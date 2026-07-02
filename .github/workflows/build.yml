@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -66,3 +69,15 @@ jobs:
         with:
           name: CosmosMusicPlayer-unsigned-ipa
           path: ${{ runner.temp }}/CosmosMusicPlayer-unsigned.ipa
+
+      - name: Set release tag
+        id: tag
+        run: echo "tag=build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Build ${{ github.run_number }}"
+          files: ${{ runner.temp }}/CosmosMusicPlayer-unsigned.ipa
+          generate_release_notes: true
