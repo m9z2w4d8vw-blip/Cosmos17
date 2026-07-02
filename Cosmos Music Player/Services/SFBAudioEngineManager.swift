@@ -396,6 +396,7 @@ class SFBAudioEngineManager: NSObject, ObservableObject, AudioPlayer.Delegate {
 
         guard let decoder = try track.decoder(enableDoP: enableDoP) else {
             print("❌ No decoder available for: \(url.lastPathComponent)")
+            DebugLogger.shared.error("track.decoder(enableDoP: \(enableDoP)) returned nil for \(url.lastPathComponent)", category: "Playback")
             throw NSError(domain: "SFBAudioEngineManager", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Unsupported audio format"
             ])

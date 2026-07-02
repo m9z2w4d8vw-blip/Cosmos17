@@ -948,14 +948,22 @@ class PlayerEngine: NSObject, ObservableObject {
                     print("✅ Delegated to SFBAudioEngine: \(url.lastPathComponent)")
                 } catch {
                     print("❌ SFBAudioEngine delegation failed: \(error)")
-                    
-                    // Check if this is a DSD sample rate issue - if so, try native fallback
+                    let nsError = error as NSError
+                    DebugLogger.shared.error("SFBAudioEngine failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code)]", category: "Playback")
+
+                    // Check if this is a DSD-related issue - if so, try native fallback.
+                    // NOTE: previously only matched code 1001, but SFBAudioEngineManager
+                    // actually throws domain "SFBAudioEngineManager" code 1 ("Unsupported
+                    // audio format") when track.decoder(enableDoP:) returns nil — which is
+                    // exactly what happens for a DSF file SFBAudioEngine can't decode. That
+                    // mismatch meant this fallback silently never fired for that failure mode.
                     if let nsError = error as NSError?,
-                       ((nsError.domain == "SFBAudioEngineManager" && nsError.code == 1001) ||
+                       ((nsError.domain == "SFBAudioEngineManager" && (nsError.code == 1001 || nsError.code == 1)) ||
                         (nsError.domain == "org.sbooth.AudioEngine.DSDDecoder" && nsError.code == 2)),
                        url.pathExtension.lowercased() == "dff" || url.pathExtension.lowercased() == "dsf" {
                         
                         print("💡 Attempting native playback fallback for DSD file with unsupported sample rate")
+                        DebugLogger.shared.warning("Attempting native AVAudioFile fallback for DSD file: \(url.lastPathComponent)", category: "Playback")
                         
                         // Force native playback for this DSD file
                         usingSFBEngine = false
@@ -979,6 +987,7 @@ class PlayerEngine: NSObject, ObservableObject {
                     } else {
                         // For other SFBAudioEngine errors (like AudioPlayer init failure), rethrow
                         print("❌ SFBAudioEngine failed and no fallback available for this file type")
+                        DebugLogger.shared.error("No fallback available for \(url.lastPathComponent) — rethrowing to outer catch", category: "Playback")
                         throw error
                     }
                 }
@@ -1065,6 +1074,8 @@ class PlayerEngine: NSObject, ObservableObject {
             
         } catch {
             print("Failed to load track: \(error)")
+            let nsError = error as NSError
+            DebugLogger.shared.error("loadTrack failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code)]", category: "Playback")
             playbackState = .stopped
             isLoadingTrack = false
             audioFile = nil
