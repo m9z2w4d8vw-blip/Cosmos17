@@ -133,11 +133,11 @@ actor DebugLogFileStore {
 /// synchronously, matching how the old print() calls were used.
 @MainActor
 final class DebugLogger: ObservableObject {
-    // Immutable, Sendable-typed static let on a @MainActor class is safe to
-    // access from anywhere without isolation — no annotation needed here.
-    // (The init itself is `nonisolated` below so building the instance
-    // doesn't require main-actor context either.)
-    static let shared = DebugLogger()
+    // Explicitly nonisolated: init() is nonisolated too, so building the
+    // instance needs no main-actor context, and callers in background
+    // closures (CloudKit completions, NotificationCenter observers, etc.)
+    // can reach `shared` directly without an actor hop.
+    nonisolated static let shared = DebugLogger()
 
     /// Most recent entries, newest last. Capped for in-memory display.
     @Published private(set) var entries: [DebugLogEntry] = []
