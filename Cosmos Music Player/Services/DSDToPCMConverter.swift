@@ -127,6 +127,9 @@ final class DSDToPCMConverter {
             )
 
             var totalPacketsDecoded: Int64 = 0
+            let assumedBytesPerPacket = bytesPerPacketPerChannel * (isInterleaved ? channelCount : 1)
+            let allocatedCapacityBytes = Int(packetsPerChunk) * assumedBytesPerPacket
+            var loggedFirstChunkDiagnostics = false
 
             while true {
                 try Task.checkCancellation()
@@ -141,6 +144,41 @@ final class DSDToPCMConverter {
                 }
 
                 let packetsRead = Int(compressedBuffer.packetCount)
+                let actualByteLength = Int(compressedBuffer.byteLength)
+
+                // First-chunk diagnostic: dump the real relationship between packetCount
+                // and byteLength before we trust our own assumed layout for anything.
+                if !loggedFirstChunkDiagnostics {
+                    loggedFirstChunkDiagnostics = true
+                    DebugLogger.shared.info(
+                        "DSD first chunk diagnostics: packetsRead=\(packetsRead), byteLength=\(actualByteLength), assumedBytesPerPacket=\(assumedBytesPerPacket), impliedBytesPerPacket=\(packetsRead > 0 ? Double(actualByteLength) / Double(packetsRead) : 0), allocatedCapacityBytes=\(allocatedCapacityBytes)",
+                        category: "Playback"
+                    )
+                }
+
+                // Safety guard: our unpacking math below assumes byteLength ==
+                // packetsRead * assumedBytesPerPacket. If SFBAudioEngine's real
+                // packet layout differs, indexing into dataPtr with our own offset
+                // math could walk past the actually-valid (or even allocated)
+                // region — which crashes at the memory level with no catchable
+                // Swift error. Verify the relationship holds before touching
+                // dataPtr at all; if it doesn't, fail loudly and safely instead.
+                let expectedByteLength = packetsRead * assumedBytesPerPacket
+                guard actualByteLength == expectedByteLength else {
+                    DebugLogger.shared.error(
+                        "DSD layout assumption mismatch for \(sourceURL.lastPathComponent): expected byteLength=\(expectedByteLength) (packetsRead=\(packetsRead) x assumedBytesPerPacket=\(assumedBytesPerPacket)) but decoder reported byteLength=\(actualByteLength). Refusing to read raw buffer to avoid out-of-bounds access.",
+                        category: "Playback"
+                    )
+                    throw DSDConversionError.conversionFailed("DSD packet layout assumption mismatch — expected \(expectedByteLength) bytes, decoder reported \(actualByteLength) bytes. See debug log for details.")
+                }
+                guard actualByteLength <= allocatedCapacityBytes else {
+                    DebugLogger.shared.error(
+                        "DSD byteLength exceeds allocated buffer capacity for \(sourceURL.lastPathComponent): byteLength=\(actualByteLength) > allocatedCapacityBytes=\(allocatedCapacityBytes)",
+                        category: "Playback"
+                    )
+                    throw DSDConversionError.conversionFailed("DSD decoder reported byteLength larger than allocated buffer capacity — see debug log.")
+                }
+
                 if packetsRead == 0 {
                     break // EOF
                 }
