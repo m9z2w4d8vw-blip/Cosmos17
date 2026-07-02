@@ -3,6 +3,9 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var deleteSettings = DeleteSettings.load()
+    @State private var versionTapCount = 0
+    @State private var showAdvancedSection = false
+    @ObservedObject private var debugLogger = DebugLogger.shared
     
     var body: some View {
         NavigationView {
@@ -177,6 +180,17 @@ struct SettingsView: View {
                         Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown")
                             .foregroundColor(.secondary)
                     }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard !showAdvancedSection else { return }
+                        versionTapCount += 1
+                        if versionTapCount >= 5 {
+                            withAnimation {
+                                showAdvancedSection = true
+                            }
+                            DebugLogger.shared.info("Advanced/Debug section unlocked via version tap", category: "Settings")
+                        }
+                    }
                     
                     HStack {
                         Text(Localized.appName)
@@ -186,12 +200,11 @@ struct SettingsView: View {
                     }
                     
                     Button(action: {
-                        print("🔗 GitHub repository button tapped")
+                        DebugLogger.shared.info("GitHub repository button tapped", category: "Settings")
                         if let url = URL(string: "https://github.com/clquwu/Cosmos-Music-Player") {
-                            print("🔗 Opening URL: \(url)")
                             UIApplication.shared.open(url)
                         } else {
-                            print("❌ Invalid GitHub URL")
+                            DebugLogger.shared.error("Invalid GitHub URL", category: "Settings")
                         }
                     }) {
                         HStack {
@@ -205,6 +218,24 @@ struct SettingsView: View {
                         .contentShape(Rectangle()) // Make entire area tappable
                     }
                     .buttonStyle(PlainButtonStyle()) // Remove default button styling that might interfere
+                }
+
+                if showAdvancedSection {
+                    Section("Advanced") {
+                        NavigationLink(destination: DebugLogView()) {
+                            HStack {
+                                Image(systemName: "ladybug.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.system(size: 20))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Debug Log")
+                                    Text("\(debugLogger.entries.count) entries this session")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) {
