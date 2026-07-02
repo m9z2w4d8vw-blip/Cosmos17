@@ -74,7 +74,9 @@ final class DSDToPCMConverter {
     private static func convert(sourceURL: URL, outputURL: URL) async throws {
         try await Task.detached(priority: .userInitiated) {
             let decoder = try SFBAudioEngine.DSDDecoder(url: sourceURL)
-            guard decoder.open() else {
+            do {
+                try decoder.open()
+            } catch {
                 throw DSDConversionError.decoderOpenFailed
             }
             defer { try? decoder.close() }
