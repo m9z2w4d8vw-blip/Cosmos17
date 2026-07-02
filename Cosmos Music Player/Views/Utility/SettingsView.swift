@@ -21,11 +21,26 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                     
                     Toggle(Localized.forceDarkMode, isOn: $deleteSettings.forceDarkMode)
-                        .onChange(of: deleteSettings.forceDarkMode) { _, _ in
+                        .onChange(of: deleteSettings.forceDarkMode) { _, newValue in
+                            if newValue {
+                                deleteSettings.forceLightMode = false
+                            }
                             deleteSettings.save()
                         }
                     
                     Text(Localized.overrideSystemAppearance)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Toggle("Force Light Mode", isOn: $deleteSettings.forceLightMode)
+                        .onChange(of: deleteSettings.forceLightMode) { _, newValue in
+                            if newValue {
+                                deleteSettings.forceDarkMode = false
+                            }
+                            deleteSettings.save()
+                        }
+                    
+                    Text("Override system appearance and force the app to use light mode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     

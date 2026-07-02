@@ -102,6 +102,7 @@ struct DeleteSettings: Codable {
     var minimalistIcons: Bool = false
     var backgroundColorChoice: BackgroundColor = .violet
     var forceDarkMode: Bool = false
+    var forceLightMode: Bool = false
     var dsdPlaybackMode: DSDPlaybackMode = .pcm
     var deleteFromLibraryOnly: Bool = false
     var lastLibraryScanDate: Date? = nil
@@ -119,6 +120,7 @@ struct DeleteSettings: Codable {
         minimalistIcons = try container.decodeIfPresent(Bool.self, forKey: .minimalistIcons) ?? false
         backgroundColorChoice = try container.decodeIfPresent(BackgroundColor.self, forKey: .backgroundColorChoice) ?? .violet
         forceDarkMode = try container.decodeIfPresent(Bool.self, forKey: .forceDarkMode) ?? false
+        forceLightMode = try container.decodeIfPresent(Bool.self, forKey: .forceLightMode) ?? false
         dsdPlaybackMode = try container.decodeIfPresent(DSDPlaybackMode.self, forKey: .dsdPlaybackMode) ?? .pcm
         deleteFromLibraryOnly = try container.decodeIfPresent(Bool.self, forKey: .deleteFromLibraryOnly) ?? false
         lastLibraryScanDate = try container.decodeIfPresent(Date.self, forKey: .lastLibraryScanDate)

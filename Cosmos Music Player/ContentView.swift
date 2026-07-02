@@ -13,10 +13,16 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var settings = DeleteSettings.load()
     
+    private var effectiveColorScheme: ColorScheme? {
+        if settings.forceDarkMode { return .dark }
+        if settings.forceLightMode { return .light }
+        return nil
+    }
+    
     var body: some View {
         mainContent
             .background(.clear)
-            .preferredColorScheme(settings.forceDarkMode ? .dark : nil)
+            .preferredColorScheme(effectiveColorScheme)
             .accentColor(settings.backgroundColorChoice.color)
             .modifier(LifecycleModifier(
                 appCoordinator: appCoordinator,

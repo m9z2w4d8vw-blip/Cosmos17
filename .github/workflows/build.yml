@@ -57,6 +57,22 @@ jobs:
             echo "DISCOGS_CONSUMER_SECRET=$DISCOGS_CONSUMER_SECRET"
           } > "$APP_PATH/.env"
 
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Inject entitlements with ldid (for TrollStore)
+        run: |
+          APP_PATH="$RUNNER_TEMP/Cosmos.xcarchive/Products/Applications/Cosmos Music Player.app"
+          # CODE_SIGNING_ALLOWED=NO above means Xcode never merges the .entitlements
+          # file into the binary at all — this step embeds it directly with ldid so
+          # TrollStore (which fake-signs and preserves whatever's already embedded)
+          # has real entitlements to work with, instead of effectively none.
+          # NOTE: this restores sandbox/app-group style entitlements, but Apple-ID-tied
+          # capabilities (CloudKit, Siri) require actual account-level provisioning
+          # that ldid can't fake — those stay disabled regardless (see checkAppleIDStatus
+          # and setupSiriIntegration, which already avoid calling those APIs).
+          ldid -S"Cosmos Music Player/Cosmos Music Player.entitlements" "$APP_PATH/Cosmos Music Player"
+
       - name: Package IPA
         run: |
           mkdir -p "$RUNNER_TEMP/Payload"
