@@ -133,10 +133,11 @@ actor DebugLogFileStore {
 /// synchronously, matching how the old print() calls were used.
 @MainActor
 final class DebugLogger: ObservableObject {
-    // Suggested by the compiler itself for exactly this pattern: the
-    // instance is created once, never reassigned, and all its mutable
-    // state (entries) is only ever touched on MainActor internally.
-    nonisolated(unsafe) static let shared = DebugLogger()
+    // Immutable, Sendable-typed static let on a @MainActor class is safe to
+    // access from anywhere without isolation — no annotation needed here.
+    // (The init itself is `nonisolated` below so building the instance
+    // doesn't require main-actor context either.)
+    static let shared = DebugLogger()
 
     /// Most recent entries, newest last. Capped for in-memory display.
     @Published private(set) var entries: [DebugLogEntry] = []
@@ -144,7 +145,7 @@ final class DebugLogger: ObservableObject {
     private let maxInMemoryEntries = 1000
     private nonisolated let fileStore = DebugLogFileStore()
 
-    private init() {
+    private nonisolated init() {
         log(.info, category: "DebugLogger", "Session started", file: #file, function: #function, line: #line)
     }
 
