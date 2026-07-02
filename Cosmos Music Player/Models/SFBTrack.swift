@@ -37,6 +37,7 @@ struct SFBTrack: Identifiable {
             self.sampleRate = sampleRate
 
             print("🔍 SFBTrack AudioFile properties: frameLength=\(frameLength), sampleRate=\(sampleRate), duration=\(durationProperty)")
+            DebugLogger.shared.info("SFBTrack properties for \(url.lastPathComponent): frameLength=\(frameLength), sampleRate=\(sampleRate), duration=\(durationProperty)", category: "Playback")
 
             // For duration, prefer the direct duration property if available
             if durationProperty > 0 {
@@ -69,10 +70,12 @@ struct SFBTrack: Identifiable {
             do {
                 dsdDecoder = try DSDDecoder(url: url)
             } catch {
+                let nsError = error as NSError
                 print("❌ DSDDecoder creation failed for \(url.lastPathComponent): \(error)")
-                print("💡 This may be due to unsupported DSD sample rate - returning nil to fallback to native playback")
+                DebugLogger.shared.error("DSDDecoder creation failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)]", category: "Playback")
                 return nil // This will cause SFBAudioEngine to return false from canHandle, falling back to native
             }
+            DebugLogger.shared.info("DSDDecoder opened OK for \(url.lastPathComponent) — sourceFormat=\(dsdDecoder.sourceFormat)", category: "Playback")
 
             if enableDoP {
                 // For external DACs, use DoP with proper error handling
@@ -82,7 +85,9 @@ struct SFBTrack: Identifiable {
                     print("✅ DoP decoder created successfully for DAC")
                     return dopDecoder
                 } catch {
+                    let nsError = error as NSError
                     print("❌ DoP failed for DAC, this may cause noise issues: \(error)")
+                    DebugLogger.shared.warning("DoP decoder failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)], sourceFormat=\(dsdDecoder.sourceFormat) — trying PCM fallback", category: "Playback")
                     // For DACs that support DoP, failing back to PCM may cause noise
                     // Try to create PCM decoder but warn about potential issues
                     do {
@@ -90,7 +95,9 @@ struct SFBTrack: Identifiable {
                         print("⚠️ Using PCM fallback - may cause noise on DoP-capable DAC")
                         return pcmDecoder
                     } catch {
+                        let pcmError = error as NSError
                         print("❌ Both DoP and PCM failed: \(error)")
+                        DebugLogger.shared.error("Both DoP and PCM decoders failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(pcmError.domain), code=\(pcmError.code), userInfo=\(pcmError.userInfo)], sourceFormat=\(dsdDecoder.sourceFormat)", category: "Playback")
                         throw error
                     }
                 }
@@ -101,14 +108,18 @@ struct SFBTrack: Identifiable {
                     print("✅ DSD PCM decoder created for internal audio")
                     return pcmDecoder
                 } catch {
+                    let nsError = error as NSError
                     print("⚠️ DSD PCM conversion failed, trying DoP as fallback: \(error)")
+                    DebugLogger.shared.warning("DSDPCMDecoder failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)], sourceFormat=\(dsdDecoder.sourceFormat) — trying DoP fallback", category: "Playback")
                     // Fallback to DoP if PCM fails (e.g., high DSD rates)
                     do {
                         let dopDecoder = try DoPDecoder(decoder: dsdDecoder)
                         print("✅ DoP decoder created as PCM fallback")
                         return dopDecoder
                     } catch {
+                        let dopError = error as NSError
                         print("❌ Both PCM and DoP failed: \(error)")
+                        DebugLogger.shared.error("Both PCM and DoP decoders failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(dopError.domain), code=\(dopError.code), userInfo=\(dopError.userInfo)], sourceFormat=\(dsdDecoder.sourceFormat)", category: "Playback")
                         throw error
                     }
                 }

@@ -55,6 +55,10 @@ class PlayerEngine: NSObject, ObservableObject {
     let eqManager = EQManager.shared
     
     private var isLoadingTrack = false
+    // Tracks the stableId of the last track that failed to load, so play()'s
+    // auto-reload branch stops retrying instead of looping forever on a
+    // track that can never load (e.g. unsupported DSD file).
+    private var lastFailedTrackStableId: String?
     private var currentLoadTask: Task<Void, Error>?
     private var hasRestoredState = false
     private var hasSetupAudioEngine = false
@@ -949,47 +953,16 @@ class PlayerEngine: NSObject, ObservableObject {
                 } catch {
                     print("❌ SFBAudioEngine delegation failed: \(error)")
                     let nsError = error as NSError
-                    DebugLogger.shared.error("SFBAudioEngine failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code)]", category: "Playback")
+                    DebugLogger.shared.error("SFBAudioEngine failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)]", category: "Playback")
 
-                    // Check if this is a DSD-related issue - if so, try native fallback.
-                    // NOTE: previously only matched code 1001, but SFBAudioEngineManager
-                    // actually throws domain "SFBAudioEngineManager" code 1 ("Unsupported
-                    // audio format") when track.decoder(enableDoP:) returns nil — which is
-                    // exactly what happens for a DSF file SFBAudioEngine can't decode. That
-                    // mismatch meant this fallback silently never fired for that failure mode.
-                    if let nsError = error as NSError?,
-                       ((nsError.domain == "SFBAudioEngineManager" && (nsError.code == 1001 || nsError.code == 1)) ||
-                        (nsError.domain == "org.sbooth.AudioEngine.DSDDecoder" && nsError.code == 2)),
-                       url.pathExtension.lowercased() == "dff" || url.pathExtension.lowercased() == "dsf" {
-                        
-                        print("💡 Attempting native playback fallback for DSD file with unsupported sample rate")
-                        DebugLogger.shared.warning("Attempting native AVAudioFile fallback for DSD file: \(url.lastPathComponent)", category: "Playback")
-                        
-                        // Force native playback for this DSD file
-                        usingSFBEngine = false
-                        
-                        do {
-                            // Try native AVAudioFile loading
-                            audioFile = try await withCheckedThrowingContinuation { continuation in
-                                DispatchQueue.global(qos: .background).async {
-                                    do {
-                                        let file = try AVAudioFile(forReading: url)
-                                        continuation.resume(returning: file)
-                                    } catch {
-                                        continuation.resume(throwing: error)
-                                    }
-                                }
-                            }
-                            
-                            print("✅ DSD file loaded successfully with native AVAudioFile fallback")
-                            
-                        }
-                    } else {
-                        // For other SFBAudioEngine errors (like AudioPlayer init failure), rethrow
-                        print("❌ SFBAudioEngine failed and no fallback available for this file type")
-                        DebugLogger.shared.error("No fallback available for \(url.lastPathComponent) — rethrowing to outer catch", category: "Playback")
-                        throw error
-                    }
+                    // NOTE: A native AVAudioFile fallback for DSD files was tried previously
+                    // and removed — AVAudioFile fundamentally cannot open .dsf/.dff at all
+                    // (it throws kAudioFileUnsupportedFileTypeError, confirmed via debug log),
+                    // so that fallback could never succeed and only delayed surfacing the
+                    // real error by ~250-300ms every time. DSD failures now rethrow immediately.
+                    print("❌ SFBAudioEngine failed and no fallback available for this file type")
+                    DebugLogger.shared.error("No fallback available for \(url.lastPathComponent) — rethrowing to outer catch", category: "Playback")
+                    throw error
                 }
             } else {
                 // Use your existing native implementation for FLAC, MP3, WAV, AAC
@@ -1071,14 +1044,17 @@ class PlayerEngine: NSObject, ObservableObject {
             
             playbackState = .stopped
             isLoadingTrack = false
+            lastFailedTrackStableId = nil
             
         } catch {
             print("Failed to load track: \(error)")
             let nsError = error as NSError
-            DebugLogger.shared.error("loadTrack failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code)]", category: "Playback")
+            DebugLogger.shared.error("loadTrack failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)]", category: "Playback")
             playbackState = .stopped
             isLoadingTrack = false
             audioFile = nil
+            usingSFBEngine = false
+            lastFailedTrackStableId = track.stableId
         }
     }
     
@@ -1102,8 +1078,20 @@ class PlayerEngine: NSObject, ObservableObject {
             }
         }
         
+        // If this exact track already failed to load, stop here instead of
+        // retrying forever — this is the fix for the infinite-retry loop
+        // that was hammering loadTrack every ~100ms on unsupported files
+        // (e.g. DSD files SFBAudioEngine can't decode).
+        if let currentTrack, currentTrack.stableId == lastFailedTrackStableId {
+            print("🛑 Not retrying play() — \(currentTrack.title) already failed to load")
+            DebugLogger.shared.error("play() aborted retry — \(currentTrack.title) already failed to load, giving up", category: "Playback")
+            playbackState = .stopped
+            isPlaying = false
+            return
+        }
+
         // If no audio file is loaded but we have a current track, load it first
-        if audioFile == nil && currentTrack != nil && !isLoadingTrack {
+        if audioFile == nil && !usingSFBEngine && currentTrack != nil && !isLoadingTrack {
             Task {
                 // If state was already restored but audioFile is nil (e.g., after interruption),
                 // we need to reload the current track with preserved position
@@ -1122,7 +1110,14 @@ class PlayerEngine: NSObject, ObservableObject {
                     await ensurePlayerStateRestored()
                 }
                 
-                // After loading, try to play again
+                // Only retry play() if the reload actually succeeded — otherwise
+                // this would loop forever re-scheduling play() on a track that
+                // can never load.
+                guard let currentTrack, currentTrack.stableId != lastFailedTrackStableId else {
+                    print("🛑 Reload failed, not rescheduling play()")
+                    return
+                }
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     self.play()
                 }
@@ -1717,6 +1712,13 @@ class PlayerEngine: NSObject, ObservableObject {
         normalizeIndexAndTrack()
         
         await loadTrack(track)
+        
+        // Only auto-play if the load actually succeeded — otherwise this
+        // would kick off play()'s retry logic on a track that just failed.
+        guard track.stableId != lastFailedTrackStableId else {
+            print("🛑 playTrack: load failed for \(track.title), not auto-playing")
+            return
+        }
         
         // Auto-play immediately after loading completes
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
