@@ -143,7 +143,7 @@ struct PlaylistCard: View {
                     // Custom cover image
                     Image(uiImage: customCoverImage)
                         .resizable()
-                        .widgetAccentedRenderingMode(.fullColor)
+                        .fullColorWidgetRendering()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 100, height: 100)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -194,7 +194,7 @@ struct PlaylistCard: View {
                let uiImage = UIImage(data: artworkData) {
                 Image(uiImage: uiImage)
                     .resizable()
-                    .widgetAccentedRenderingMode(.fullColor)
+                    .fullColorWidgetRendering()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 49, height: 49)
                     .clipped()
