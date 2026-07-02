@@ -9,9 +9,9 @@ import WidgetKit
 import SwiftUI
 
 // MARK: - iOS 17 compatibility helper
-// widgetAccentedRenderingMode(_:) is iOS 18.0+ only. This wrapper applies it
-// when available and falls back to default rendering on iOS 17.
-extension View {
+// widgetAccentedRenderingMode(_:) only exists on Image, and only on iOS 18.0+.
+// This wrapper applies it when available and falls back to plain rendering on iOS 17.
+extension Image {
     @ViewBuilder
     func fullColorWidgetRendering() -> some View {
         if #available(iOS 18.0, *) {
