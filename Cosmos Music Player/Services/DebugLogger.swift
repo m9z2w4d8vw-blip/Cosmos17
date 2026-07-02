@@ -7,11 +7,19 @@
 //  Xcode being attached or Apple's Settings > Analytics data (which is often
 //  delayed, sampled, or missing symbols entirely on TestFlight/ad-hoc builds).
 //
+//  Design notes (Swift 6 strict concurrency):
+//  - All file I/O lives on `DebugLogFileStore`, an actor, so writes are
+//    serialized safely without a manual DispatchQueue.
+//  - `DebugLogger` itself is @MainActor (it drives @Published UI state), but
+//    its logging methods are `nonisolated` so `DebugLogger.shared.info(...)`
+//    can still be called synchronously from any thread/closure, exactly like
+//    the print() calls it replaces.
+//
 
 import Foundation
 import Combine
 
-enum DebugLogLevel: String {
+enum DebugLogLevel: String, Sendable {
     case info = "INFO"
     case warning = "WARN"
     case error = "ERROR"
@@ -25,7 +33,7 @@ enum DebugLogLevel: String {
     }
 }
 
-struct DebugLogEntry: Identifiable {
+struct DebugLogEntry: Identifiable, Sendable {
     let id = UUID()
     let timestamp: Date
     let level: DebugLogLevel
@@ -47,79 +55,28 @@ struct DebugLogEntry: Identifiable {
     }()
 }
 
-/// Singleton debug logger. Use `DebugLogger.shared.log(...)` from anywhere.
-/// Safe to call from any thread/actor context — internal queue serializes writes.
-final class DebugLogger: ObservableObject {
-    static let shared = DebugLogger()
+// MARK: - File store (actor = safe serialized file I/O, no manual queue needed)
 
-    /// Most recent entries, newest last. Capped for in-memory display.
-    @Published private(set) var entries: [DebugLogEntry] = []
+actor DebugLogFileStore {
+    // Immutable, Sendable (URL) stored properties on an actor are safe to
+    // read from outside without `await` — used by DebugLogger for the
+    // synchronous nonisolated logging path.
+    nonisolated let logFileURL: URL
+    nonisolated let rotatedFileURL: URL
 
-    private let maxInMemoryEntries = 1000
     private let maxFileSizeBytes = 2 * 1024 * 1024 // 2 MB, then rotate
-    private let queue = DispatchQueue(label: "dev.clq.CosmosMusicPlayer.debuglogger", qos: .utility)
 
-    private let logFileURL: URL
-    private let rotatedFileURL: URL
-
-    private init() {
+    init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let logsDir = docs.appendingPathComponent("DebugLogs", isDirectory: true)
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
         logFileURL = logsDir.appendingPathComponent("debug.log")
         rotatedFileURL = logsDir.appendingPathComponent("debug.previous.log")
-
-        log(.info, category: "DebugLogger", "Session started", file: #file, function: #function, line: #line)
     }
 
-    // MARK: - Public logging API
-
-    func info(_ message: String, category: String = "General",
-              file: String = #file, function: String = #function, line: Int = #line) {
-        log(.info, category: category, message, file: file, function: function, line: line)
-    }
-
-    func warning(_ message: String, category: String = "General",
-                 file: String = #file, function: String = #function, line: Int = #line) {
-        log(.warning, category: category, message, file: file, function: function, line: line)
-    }
-
-    func error(_ message: String, category: String = "General",
-               file: String = #file, function: String = #function, line: Int = #line) {
-        log(.error, category: category, message, file: file, function: function, line: line)
-    }
-
-    /// Generic entry point (also used internally).
-    func log(_ level: DebugLogLevel, category: String = "General", _ message: String,
-              file: String = #file, function: String = #function, line: Int = #line) {
-        let fileName = (file as NSString).lastPathComponent
-        let entry = DebugLogEntry(timestamp: Date(), level: level, category: category,
-                                   message: message, file: fileName, function: function, line: line)
-
-        // Mirror to Xcode console immediately, same style as the existing print() calls.
-        print(entry.formatted)
-
-        // Update in-memory list on main thread (drives the UI).
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.entries.append(entry)
-            if self.entries.count > self.maxInMemoryEntries {
-                self.entries.removeFirst(self.entries.count - self.maxInMemoryEntries)
-            }
-        }
-
-        // Persist to disk off the main thread.
-        queue.async { [weak self] in
-            self?.appendToFile(entry.formatted)
-        }
-    }
-
-    // MARK: - File handling
-
-    private func appendToFile(_ line: String) {
-        let data = (line + "\n").data(using: .utf8)!
-
+    func append(_ line: String) {
         rotateIfNeeded()
+        let data = (line + "\n").data(using: .utf8)!
 
         if FileManager.default.fileExists(atPath: logFileURL.path) {
             if let handle = try? FileHandle(forWritingTo: logFileURL) {
@@ -140,9 +97,6 @@ final class DebugLogger: ObservableObject {
         try? FileManager.default.moveItem(at: logFileURL, to: rotatedFileURL)
     }
 
-    // MARK: - Export / management
-
-    /// Combined contents of current + rotated log file, for sharing/export.
     func exportText() -> String {
         var combined = ""
         if let previous = try? String(contentsOf: rotatedFileURL, encoding: .utf8) {
@@ -154,7 +108,6 @@ final class DebugLogger: ObservableObject {
         return combined.isEmpty ? "No log data yet." : combined
     }
 
-    /// URL suitable for a share sheet (writes a fresh export snapshot to a temp file).
     func exportFileURL() -> URL? {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("CosmosDebugLog-\(Int(Date().timeIntervalSince1970)).txt")
@@ -168,13 +121,97 @@ final class DebugLogger: ObservableObject {
     }
 
     func clear() {
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            try? FileManager.default.removeItem(at: self.logFileURL)
-            try? FileManager.default.removeItem(at: self.rotatedFileURL)
+        try? FileManager.default.removeItem(at: logFileURL)
+        try? FileManager.default.removeItem(at: rotatedFileURL)
+    }
+}
+
+// MARK: - Public-facing logger
+
+/// Singleton debug logger. Use `DebugLogger.shared.log(...)` from anywhere,
+/// on any thread — logging methods are `nonisolated` and safe to call
+/// synchronously, matching how the old print() calls were used.
+@MainActor
+final class DebugLogger: ObservableObject {
+    // Suggested by the compiler itself for exactly this pattern: the
+    // instance is created once, never reassigned, and all its mutable
+    // state (entries) is only ever touched on MainActor internally.
+    nonisolated(unsafe) static let shared = DebugLogger()
+
+    /// Most recent entries, newest last. Capped for in-memory display.
+    @Published private(set) var entries: [DebugLogEntry] = []
+
+    private let maxInMemoryEntries = 1000
+    private nonisolated let fileStore = DebugLogFileStore()
+
+    private init() {
+        log(.info, category: "DebugLogger", "Session started", file: #file, function: #function, line: #line)
+    }
+
+    // MARK: - Public logging API (callable from any thread)
+
+    nonisolated func info(_ message: String, category: String = "General",
+              file: String = #file, function: String = #function, line: Int = #line) {
+        log(.info, category: category, message, file: file, function: function, line: line)
+    }
+
+    nonisolated func warning(_ message: String, category: String = "General",
+                 file: String = #file, function: String = #function, line: Int = #line) {
+        log(.warning, category: category, message, file: file, function: function, line: line)
+    }
+
+    nonisolated func error(_ message: String, category: String = "General",
+               file: String = #file, function: String = #function, line: Int = #line) {
+        log(.error, category: category, message, file: file, function: function, line: line)
+    }
+
+    /// Generic entry point (also used internally).
+    nonisolated func log(_ level: DebugLogLevel, category: String = "General", _ message: String,
+              file: String = #file, function: String = #function, line: Int = #line) {
+        let fileName = (file as NSString).lastPathComponent
+        let entry = DebugLogEntry(timestamp: Date(), level: level, category: category,
+                                   message: message, file: fileName, function: function, line: line)
+
+        // Mirror to Xcode console immediately, same style as the print() calls it replaces.
+        print(entry.formatted)
+
+        // Update @Published state on the main actor (drives the UI).
+        Task { @MainActor [weak self] in
+            self?.appendToMemory(entry)
         }
-        DispatchQueue.main.async { [weak self] in
+
+        // Persist to disk via the file-store actor (serialized, off the main thread).
+        Task {
+            await self.fileStore.append(entry.formatted)
+        }
+    }
+
+    @MainActor
+    private func appendToMemory(_ entry: DebugLogEntry) {
+        entries.append(entry)
+        if entries.count > maxInMemoryEntries {
+            entries.removeFirst(entries.count - maxInMemoryEntries)
+        }
+    }
+
+    // MARK: - Export / management
+
+    /// Combined contents of current + rotated log file, for sharing/export.
+    func exportText() async -> String {
+        await fileStore.exportText()
+    }
+
+    /// URL suitable for a share sheet (writes a fresh export snapshot to a temp file).
+    func exportFileURL() async -> URL? {
+        await fileStore.exportFileURL()
+    }
+
+    nonisolated func clear() {
+        Task { @MainActor [weak self] in
             self?.entries.removeAll()
+        }
+        Task {
+            await fileStore.clear()
         }
     }
 }

@@ -57,7 +57,9 @@ struct DebugLogView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button {
-                        shareURL = DebugLogger.shared.exportFileURL()
+                        Task {
+                            shareURL = await DebugLogger.shared.exportFileURL()
+                        }
                     } label: {
                         Label("Export / Share", systemImage: "square.and.arrow.up")
                     }
