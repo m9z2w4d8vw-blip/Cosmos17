@@ -955,14 +955,43 @@ class PlayerEngine: NSObject, ObservableObject {
                     let nsError = error as NSError
                     DebugLogger.shared.error("SFBAudioEngine failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)]", category: "Playback")
 
-                    // NOTE: A native AVAudioFile fallback for DSD files was tried previously
-                    // and removed — AVAudioFile fundamentally cannot open .dsf/.dff at all
-                    // (it throws kAudioFileUnsupportedFileTypeError, confirmed via debug log),
-                    // so that fallback could never succeed and only delayed surfacing the
-                    // real error by ~250-300ms every time. DSD failures now rethrow immediately.
-                    print("❌ SFBAudioEngine failed and no fallback available for this file type")
-                    DebugLogger.shared.error("No fallback available for \(url.lastPathComponent) — rethrowing to outer catch", category: "Playback")
-                    throw error
+                    // SFBAudioEngine's built-in DSD-to-PCM converter is DSD64-only
+                    // (confirmed via its own README/feature list). For DSD files it
+                    // rejects for that reason, fall back to our own DSD decimator
+                    // (DSDToPCMConverter) which reads raw DSD bits directly from
+                    // SFBAudioEngine's DSDDecoder — which decodes at ANY rate — and
+                    // converts to PCM ourselves. NOTE: a native AVAudioFile fallback
+                    // was tried previously and removed — AVAudioFile cannot open
+                    // .dsf/.dff at all, confirmed via debug log (kAudioFileUnsupportedFileTypeError).
+                    let isDSDFile = url.pathExtension.lowercased() == "dsf" || url.pathExtension.lowercased() == "dff"
+                    let isUnsupportedRateError =
+                        (nsError.domain == "org.sbooth.AudioEngine.DSDDecoder" && nsError.code == 2) ||
+                        (nsError.domain == "SFBAudioEngineManager" && (nsError.code == 1 || nsError.code == 1001))
+
+                    if isDSDFile && isUnsupportedRateError {
+                        print("💡 Attempting native DSD->PCM decimation fallback for: \(url.lastPathComponent)")
+                        DebugLogger.shared.warning("Attempting native DSDToPCMConverter fallback for \(url.lastPathComponent)", category: "Playback")
+
+                        do {
+                            let convertedURL = try await DSDToPCMConverter.convertedFileURL(forDSDFileAt: url)
+                            usingSFBEngine = false
+                            let nativeFile = try AVAudioFile(forReading: convertedURL)
+                            audioFile = nativeFile
+                            duration = Double(nativeFile.length) / nativeFile.processingFormat.sampleRate
+                            ensureAudioEngineSetup(with: nativeFile.processingFormat)
+                            print("✅ DSD file loaded via native decimation fallback: \(url.lastPathComponent)")
+                            DebugLogger.shared.info("Native DSD decimation fallback succeeded for \(url.lastPathComponent)", category: "Playback")
+                        } catch {
+                            let convError = error as NSError
+                            print("❌ Native DSD decimation fallback also failed: \(error)")
+                            DebugLogger.shared.error("Native DSD decimation fallback failed for \(url.lastPathComponent): \(error.localizedDescription) [domain=\(convError.domain), code=\(convError.code)]", category: "Playback")
+                            throw error
+                        }
+                    } else {
+                        print("❌ SFBAudioEngine failed and no fallback available for this file type")
+                        DebugLogger.shared.error("No fallback available for \(url.lastPathComponent) — rethrowing to outer catch", category: "Playback")
+                        throw error
+                    }
                 }
             } else {
                 // Use your existing native implementation for FLAC, MP3, WAV, AAC
