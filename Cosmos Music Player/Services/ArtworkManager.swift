@@ -53,7 +53,9 @@ class ArtworkManager: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.clearCache()
+                Task { @MainActor in
+                    self?.clearCache()
+                }
             }
         )
         notificationObservers.append(
@@ -62,7 +64,9 @@ class ArtworkManager: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.clearCache()
+                Task { @MainActor in
+                    self?.clearCache()
+                }
             }
         )
 

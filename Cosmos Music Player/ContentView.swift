@@ -147,9 +147,11 @@ struct LifecycleModifier: ViewModifier {
                 if isIndexing {
                     refreshTimer?.invalidate()
                     refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
-                        guard hasPendingIndexRefresh else { return }
-                        hasPendingIndexRefresh = false
-                        Task { await onRefresh() }
+                        Task { @MainActor in
+                            guard hasPendingIndexRefresh else { return }
+                            hasPendingIndexRefresh = false
+                            await onRefresh()
+                        }
                     }
                 } else {
                     refreshTimer?.invalidate()

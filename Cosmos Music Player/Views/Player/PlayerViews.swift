@@ -1026,7 +1026,7 @@ struct MiniPlayerView: View {
 }
 
 
-struct TrackRowView: View, @MainActor Equatable {
+struct TrackRowView: View, Equatable {
     // 1. Pass these in instead of observing PlayerEngine
     let track: Track
     let activeTrackId: String?
@@ -1054,7 +1054,7 @@ struct TrackRowView: View, @MainActor Equatable {
     }
     
     // 3. Equatable Conformance: Prevents redraws when PlayerEngine updates time
-    static func == (lhs: TrackRowView, rhs: TrackRowView) -> Bool {
+    nonisolated static func == (lhs: TrackRowView, rhs: TrackRowView) -> Bool {
         return lhs.track.stableId == rhs.track.stableId &&
         lhs.activeTrackId == rhs.activeTrackId &&
         lhs.isAudioPlaying == rhs.isAudioPlaying &&

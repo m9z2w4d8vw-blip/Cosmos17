@@ -502,14 +502,18 @@ actor LyricsManager {
     private nonisolated func readLittleEndianUInt64(from data: Data, offset: Int) -> UInt64 {
         guard offset >= 0, offset + 8 <= data.count else { return 0 }
 
-        return UInt64(data[offset]) |
-               UInt64(data[offset + 1]) << 8 |
-               UInt64(data[offset + 2]) << 16 |
-               UInt64(data[offset + 3]) << 24 |
-               UInt64(data[offset + 4]) << 32 |
-               UInt64(data[offset + 5]) << 40 |
-               UInt64(data[offset + 6]) << 48 |
-               UInt64(data[offset + 7]) << 56
+        let b0: UInt64 = UInt64(data[offset])
+        let b1: UInt64 = UInt64(data[offset + 1]) << 8
+        let b2: UInt64 = UInt64(data[offset + 2]) << 16
+        let b3: UInt64 = UInt64(data[offset + 3]) << 24
+        let b4: UInt64 = UInt64(data[offset + 4]) << 32
+        let b5: UInt64 = UInt64(data[offset + 5]) << 40
+        let b6: UInt64 = UInt64(data[offset + 6]) << 48
+        let b7: UInt64 = UInt64(data[offset + 7]) << 56
+
+        let low = b0 | b1 | b2 | b3
+        let high = b4 | b5 | b6 | b7
+        return low | high
     }
 
     private nonisolated func readLittleEndianUInt32(from data: Data, offset: Int) -> UInt32 {
