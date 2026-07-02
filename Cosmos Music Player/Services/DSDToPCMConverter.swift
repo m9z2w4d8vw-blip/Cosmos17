@@ -61,12 +61,42 @@ final class DSDToPCMConverter {
         let outputURL = cacheDir.appendingPathComponent(cacheKey).appendingPathExtension("caf")
 
         if FileManager.default.fileExists(atPath: outputURL.path) {
-            DebugLogger.shared.info("Using cached DSD->PCM conversion for \(sourceURL.lastPathComponent)", category: "Playback")
-            return outputURL
+            // Guard against leftover broken/empty cache files from a prior
+            // crashed conversion (this exact scenario happened before this
+            // fix existed — an empty .caf got treated as a permanent cache
+            // hit). A real converted file will always be well over a few KB;
+            // anything suspiciously small is treated as invalid and removed
+            // so we actually retry the conversion instead of trusting it.
+            let attrs = try? FileManager.default.attributesOfItem(atPath: outputURL.path)
+            let size = (attrs?[.size] as? Int) ?? 0
+            if size > 4096 {
+                DebugLogger.shared.info("Using cached DSD->PCM conversion for \(sourceURL.lastPathComponent) (\(size) bytes)", category: "Playback")
+                return outputURL
+            } else {
+                DebugLogger.shared.error("Discarding invalid/empty cached conversion for \(sourceURL.lastPathComponent) (\(size) bytes) — likely leftover from a prior crash. Re-converting.", category: "Playback")
+                try? FileManager.default.removeItem(at: outputURL)
+            }
         }
 
+        // Convert into a temp file first, and only move it into the real
+        // cache location once conversion has FULLY succeeded. If we wrote
+        // directly to outputURL and the process crashed or got killed
+        // mid-conversion, AVAudioFile(forWriting:) would already have
+        // created an empty/partial file at outputURL — and the fileExists()
+        // check above would then treat that broken file as a permanent
+        // cache hit, silently "succeeding" with dead/empty audio on every
+        // future attempt instead of ever retrying the real conversion.
+        let tempURL = cacheDir.appendingPathComponent(cacheKey + "-inprogress").appendingPathExtension("caf")
+        try? FileManager.default.removeItem(at: tempURL)
+
         DebugLogger.shared.info("Starting native DSD->PCM conversion for \(sourceURL.lastPathComponent)", category: "Playback")
-        try await convert(sourceURL: sourceURL, outputURL: outputURL)
+        do {
+            try await convert(sourceURL: sourceURL, outputURL: tempURL)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
+        try FileManager.default.moveItem(at: tempURL, to: outputURL)
         DebugLogger.shared.info("Finished native DSD->PCM conversion for \(sourceURL.lastPathComponent)", category: "Playback")
         return outputURL
     }
