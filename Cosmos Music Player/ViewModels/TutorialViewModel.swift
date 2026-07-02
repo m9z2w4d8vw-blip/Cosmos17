@@ -31,7 +31,7 @@ class TutorialViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            print("📱 iCloud Drive status changed - rechecking...")
+            DebugLogger.shared.info("iCloud Drive status changed - rechecking...", category: "Tutorial")
             self?.checkiCloudDriveStatus()
         }
         
@@ -41,7 +41,7 @@ class TutorialViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            print("📱 CloudKit account status changed - rechecking...")
+            DebugLogger.shared.info("CloudKit account status changed - rechecking...", category: "Tutorial")
             self?.checkAppleIDStatus()
         }
     }
@@ -73,7 +73,7 @@ class TutorialViewModel: ObservableObject {
                 guard let self = self else { return }
                 
                 if let error = error {
-                    print("📱 Apple ID check: ❓ CloudKit error: \(error.localizedDescription)")
+                    DebugLogger.shared.error("CloudKit accountStatus error: \(error.localizedDescription)", category: "Tutorial")
                     // Fallback to FileManager approach
                     self.fallbackAppleIDCheck()
                     return
@@ -83,29 +83,34 @@ class TutorialViewModel: ObservableObject {
                 case .available:
                     self.isSignedIntoAppleID = true
                     self.appleIDDetectionFailed = false
-                    print("📱 Apple ID check: ✅ Confirmed signed into iCloud (CloudKit)")
+                    DebugLogger.shared.info("Apple ID check: confirmed signed into iCloud (CloudKit)", category: "Tutorial")
                     
                 case .noAccount:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = false
-                    print("📱 Apple ID check: ❌ Not signed into iCloud (CloudKit)")
+                    DebugLogger.shared.info("Apple ID check: not signed into iCloud (CloudKit)", category: "Tutorial")
                     
                 case .restricted:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
-                    print("📱 Apple ID check: ⚠️ iCloud access restricted (CloudKit)")
+                    DebugLogger.shared.warning("Apple ID check: iCloud access restricted (CloudKit)", category: "Tutorial")
                     
                 case .couldNotDetermine:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
-                    print("📱 Apple ID check: ❓ Could not determine status (CloudKit)")
+                    DebugLogger.shared.warning("Apple ID check: could not determine status (CloudKit)", category: "Tutorial")
                     
                 case .temporarilyUnavailable:
-                    print("Error line 104 of TutorialViewModel")
+                    // Previously fell through with no state update at all (bare print, line 104).
+                    // Treat like couldNotDetermine so UI state stays consistent instead of stale.
+                    self.isSignedIntoAppleID = false
+                    self.appleIDDetectionFailed = true
+                    DebugLogger.shared.warning("Apple ID check: temporarily unavailable (CloudKit)", category: "Tutorial")
+                    
                 @unknown default:
                     self.isSignedIntoAppleID = false
                     self.appleIDDetectionFailed = true
-                    print("📱 Apple ID check: ❓ Unknown CloudKit status")
+                    DebugLogger.shared.warning("Apple ID check: unknown CloudKit status", category: "Tutorial")
                 }
             }
         }
@@ -119,11 +124,11 @@ class TutorialViewModel: ObservableObject {
         if hasIdentityToken || hasContainerAccess {
             isSignedIntoAppleID = true
             appleIDDetectionFailed = false
-            print("📱 Apple ID check: ✅ Fallback detection successful")
+            DebugLogger.shared.info("Apple ID check: fallback detection successful", category: "Tutorial")
         } else {
             isSignedIntoAppleID = false
             appleIDDetectionFailed = true
-            print("📱 Apple ID check: ❓ Fallback detection failed")
+            DebugLogger.shared.warning("Apple ID check: fallback detection failed", category: "Tutorial")
         }
     }
     
@@ -134,13 +139,13 @@ class TutorialViewModel: ObservableObject {
         let hasIdentityToken = FileManager.default.ubiquityIdentityToken != nil
         let hasContainerAccess = FileManager.default.url(forUbiquityContainerIdentifier: nil) != nil
         
-        print("📱 iCloud Drive check: Identity token: \(hasIdentityToken), Container access: \(hasContainerAccess)")
+        DebugLogger.shared.info("iCloud Drive check: identity token=\(hasIdentityToken), container access=\(hasContainerAccess)", category: "Tutorial")
         
         if hasIdentityToken {
             // Identity token exists - iCloud Drive document storage is definitely enabled
             isiCloudDriveEnabled = true
             iCloudDetectionFailed = false
-            print("📱 iCloud Drive check: ✅ Confirmed enabled (identity token present)")
+            DebugLogger.shared.info("iCloud Drive check: confirmed enabled (identity token present)", category: "Tutorial")
             
         } else if hasContainerAccess {
             // Has container URL but no identity token
@@ -152,7 +157,7 @@ class TutorialViewModel: ObservableObject {
             // No container access - either not signed in or iCloud Drive completely disabled
             isiCloudDriveEnabled = false
             iCloudDetectionFailed = false
-            print("📱 iCloud Drive check: ❌ Disabled (no container access)")
+            DebugLogger.shared.info("iCloud Drive check: disabled (no container access)", category: "Tutorial")
         }
     }
     
@@ -160,7 +165,7 @@ class TutorialViewModel: ObservableObject {
         guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
             isiCloudDriveEnabled = false
             iCloudDetectionFailed = true
-            print("📱 iCloud Drive check: ❓ Container became unavailable")
+            DebugLogger.shared.warning("iCloud Drive check: container became unavailable", category: "Tutorial")
             return
         }
         
@@ -178,13 +183,13 @@ class TutorialViewModel: ObservableObject {
             // If we can access and create directories, iCloud Drive is working
             isiCloudDriveEnabled = true
             iCloudDetectionFailed = false
-            print("📱 iCloud Drive check: ✅ Enabled (verified write access)")
+            DebugLogger.shared.info("iCloud Drive check: enabled (verified write access)", category: "Tutorial")
             
         } catch {
             // Cannot write to container - iCloud Drive is likely disabled for this app
             isiCloudDriveEnabled = false
             iCloudDetectionFailed = false
-            print("📱 iCloud Drive check: ❌ Disabled (no write access: \(error.localizedDescription))")
+            DebugLogger.shared.error("iCloud Drive check: no write access: \(error.localizedDescription)", category: "Tutorial")
         }
     }
     
@@ -246,7 +251,7 @@ class TutorialViewModel: ObservableObject {
     func completeTutorial() {
         // Save that tutorial has been completed
         UserDefaults.standard.set(true, forKey: "HasCompletedTutorial")
-        print("✅ Tutorial completed and saved to UserDefaults")
+        DebugLogger.shared.info("Tutorial completed and saved to UserDefaults", category: "Tutorial")
     }
     
     static func shouldShowTutorial() -> Bool {
