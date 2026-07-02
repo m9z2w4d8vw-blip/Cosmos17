@@ -67,53 +67,20 @@ class TutorialViewModel: ObservableObject {
     }
     
     func checkAppleIDStatus() {
-        // Use Apple's recommended CloudKit approach for detecting iCloud sign-in status
-        CKContainer.default().accountStatus { [weak self] accountStatus, error in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                
-                if let error = error {
-                    DebugLogger.shared.error("CloudKit accountStatus error: \(error.localizedDescription)", category: "Tutorial")
-                    // Fallback to FileManager approach
-                    self.fallbackAppleIDCheck()
-                    return
-                }
-                
-                switch accountStatus {
-                case .available:
-                    self.isSignedIntoAppleID = true
-                    self.appleIDDetectionFailed = false
-                    DebugLogger.shared.info("Apple ID check: confirmed signed into iCloud (CloudKit)", category: "Tutorial")
-                    
-                case .noAccount:
-                    self.isSignedIntoAppleID = false
-                    self.appleIDDetectionFailed = false
-                    DebugLogger.shared.info("Apple ID check: not signed into iCloud (CloudKit)", category: "Tutorial")
-                    
-                case .restricted:
-                    self.isSignedIntoAppleID = false
-                    self.appleIDDetectionFailed = true
-                    DebugLogger.shared.warning("Apple ID check: iCloud access restricted (CloudKit)", category: "Tutorial")
-                    
-                case .couldNotDetermine:
-                    self.isSignedIntoAppleID = false
-                    self.appleIDDetectionFailed = true
-                    DebugLogger.shared.warning("Apple ID check: could not determine status (CloudKit)", category: "Tutorial")
-                    
-                case .temporarilyUnavailable:
-                    // Previously fell through with no state update at all (bare print, line 104).
-                    // Treat like couldNotDetermine so UI state stays consistent instead of stale.
-                    self.isSignedIntoAppleID = false
-                    self.appleIDDetectionFailed = true
-                    DebugLogger.shared.warning("Apple ID check: temporarily unavailable (CloudKit)", category: "Tutorial")
-                    
-                @unknown default:
-                    self.isSignedIntoAppleID = false
-                    self.appleIDDetectionFailed = true
-                    DebugLogger.shared.warning("Apple ID check: unknown CloudKit status", category: "Tutorial")
-                }
-            }
-        }
+        // NOTE: CKContainer.default().accountStatus(...) used to be called here.
+        // Two crash logs (2026-07-01 19:26:55 and 19:27:36 — same build, same
+        // app-binary offset, 41 seconds apart) show a SIGTRAP originating
+        // inside CloudKit's own internal dispatch_once, triggered right at
+        // this call site. That matches a missing CloudKit/iCloud entitlement
+        // in this ad-hoc/unsigned build's provisioning — the same class of
+        // issue already worked around for Siri vocabulary setup. The crash
+        // is tied to the build's provisioning, not the user's account state,
+        // so it would trap every time regardless of retry.
+        //
+        // Going straight to the FileManager-based check instead avoids
+        // CloudKit entirely and needs no entitlement.
+        DebugLogger.shared.info("checkAppleIDStatus: using FileManager-only path (CloudKit skipped — ad-hoc build has no CloudKit entitlement)", category: "Tutorial")
+        fallbackAppleIDCheck()
     }
     
     private func fallbackAppleIDCheck() {
