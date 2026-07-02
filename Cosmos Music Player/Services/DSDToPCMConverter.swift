@@ -135,9 +135,11 @@ final class DSDToPCMConverter {
             DebugLogger.shared.info("DSD conversion plan: decimationRatio=\(decimationRatio), outputSampleRate=\(outputSampleRate)", category: "Playback")
 
             // Output file: 32-bit float PCM CAF, same channel count/layout as source
+            DebugLogger.shared.info("DSD conversion step: creating output AVAudioFormat", category: "Playback")
             guard let outputFormat = AVAudioFormat(standardFormatWithSampleRate: outputSampleRate, channels: AVAudioChannelCount(channelCount)) else {
                 throw DSDConversionError.outputFileCreationFailed
             }
+            DebugLogger.shared.info("DSD conversion step: creating output AVAudioFile at \(outputURL.lastPathComponent)", category: "Playback")
             let outputFile: AVAudioFile
             do {
                 outputFile = try AVAudioFile(forWriting: outputURL, settings: outputFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -145,16 +147,39 @@ final class DSDToPCMConverter {
                 throw DSDConversionError.conversionFailed("Failed to create output file: \(error)")
             }
 
+            DebugLogger.shared.info("DSD conversion step: creating \(channelCount) DSDDecimator instance(s)", category: "Playback")
             let decimators = (0..<channelCount).map { _ in DSDDecimator(decimationRatio: decimationRatio) }
+            DebugLogger.shared.info("DSD conversion step: decimators created OK", category: "Playback")
 
-            // Read DSD in chunks of packets (1 packet = 1 byte per channel = 8 samples per channel)
-            let packetsPerChunk: AVAudioPacketCount = 65536
+            // Read DSD in chunks. IMPORTANT: `maximumPacketSize` must be large
+            // enough for whatever SFBAudioEngine's real DSD packet size is —
+            // if decode() writes more bytes per packet than we allocated,
+            // it overflows this buffer and crashes at the memory level
+            // (unrecoverable, invisible to Swift's error handling, and
+            // exactly the failure mode observed: instant, silent crash
+            // inside decode() itself, before any of our own code runs).
+            //
+            // We don't have confirmed access to SFBAudioEngine's actual DSD
+            // packet-size contract. DSF files store audio in per-channel
+            // blocks that are commonly 4096 bytes each — if a "packet" here
+            // corresponds to one such block, our old assumption of 1
+            // byte/channel/packet undersized the buffer by ~2000x, which
+            // matches a hard, instant, 100%-reproducible crash. Rather than
+            // guess the exact number, size generously oversized (16KB/packet)
+            // so decode() cannot overflow it regardless of the real layout,
+            // and let the diagnostic log + guard below (which run safely
+            // *after* decode() returns) reveal the real relationship instead
+            // of us crashing while guessing.
+            let packetsPerChunk: AVAudioPacketCount = 256
             let bytesPerPacketPerChannel = 1
+            let maxPacketSizeSafetyMargin = 16384
+            DebugLogger.shared.info("DSD conversion step: allocating AVAudioCompressedBuffer (packetCapacity=\(packetsPerChunk), maximumPacketSize=\(maxPacketSizeSafetyMargin))", category: "Playback")
             let compressedBuffer = AVAudioCompressedBuffer(
                 format: sourceFormat,
                 packetCapacity: packetsPerChunk,
-                maximumPacketSize: bytesPerPacketPerChannel * (isInterleaved ? channelCount : 1)
+                maximumPacketSize: maxPacketSizeSafetyMargin
             )
+            DebugLogger.shared.info("DSD conversion step: AVAudioCompressedBuffer allocated OK, entering decode loop", category: "Playback")
 
             var totalPacketsDecoded: Int64 = 0
             let assumedBytesPerPacket = bytesPerPacketPerChannel * (isInterleaved ? channelCount : 1)
@@ -166,11 +191,17 @@ final class DSDToPCMConverter {
                 compressedBuffer.byteLength = 0
                 compressedBuffer.packetCount = 0
 
+                if totalPacketsDecoded == 0 {
+                    DebugLogger.shared.info("DSD conversion step: about to call decoder.decode(count: \(packetsPerChunk)) for the first time", category: "Playback")
+                }
                 do {
                     try decoder.decode(into: compressedBuffer, count: packetsPerChunk)
                 } catch {
                     DebugLogger.shared.error("DSDDecoder.decode failed mid-stream for \(sourceURL.lastPathComponent) after \(totalPacketsDecoded) packets: \(error)", category: "Playback")
                     throw error
+                }
+                if totalPacketsDecoded == 0 {
+                    DebugLogger.shared.info("DSD conversion step: first decoder.decode() call returned successfully", category: "Playback")
                 }
 
                 let packetsRead = Int(compressedBuffer.packetCount)
