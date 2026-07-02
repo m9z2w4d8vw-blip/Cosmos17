@@ -202,9 +202,14 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             await MainActor.run {
                 tracksFound += 1
-                print("📢 Posting TrackFound notification for external file: \(track.title)")
+                DebugLogger.shared.info("Posting TrackFound + LibraryNeedsRefresh for external file: \(track.title)", category: "Import")
                 // Notify UI immediately that a new track was found
                 NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
+                // NOTE: library screens only observe "LibraryNeedsRefresh", not "TrackFound" —
+                // without this, newly-imported external files were saved to the DB but never
+                // appeared in the UI. Post both so existing "TrackFound" listeners (if any get
+                // added later, e.g. for widgets) keep working too.
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             }
 
             // Remove only this track from exclusion after successful explicit re-import.
@@ -216,13 +221,10 @@ class LibraryIndexer: NSObject, ObservableObject {
             return true
 
         } catch LibraryIndexerError.parseTimeout {
-            print("⏰ Timeout parsing external audio file: \(fileURL.lastPathComponent)")
-            print("❌ Skipping external file due to parsing timeout")
+            DebugLogger.shared.warning("Timeout parsing external audio file, skipping: \(fileURL.lastPathComponent)", category: "Import")
             return false
         } catch {
-            print("❌ Failed to process external track at \(fileURL.lastPathComponent): \(error)")
-            print("❌ Error type: \(type(of: error))")
-            print("❌ Error details: \(String(describing: error))")
+            DebugLogger.shared.error("Failed to process external track at \(fileURL.lastPathComponent): \(error) [\(type(of: error))]", category: "Import")
             return false
         }
     }
@@ -570,9 +572,10 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             await MainActor.run {
                 tracksFound += 1
-                print("📢 Posting TrackFound notification for: \(track.title)")
+                DebugLogger.shared.info("Posting TrackFound + LibraryNeedsRefresh for: \(track.title)", category: "Import")
                 // Notify UI immediately that a new track was found
                 NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             }
             
             // Check if file is downloaded (for iCloud files)
@@ -645,8 +648,10 @@ class LibraryIndexer: NSObject, ObservableObject {
 
             await MainActor.run {
                 tracksFound += 1
+                DebugLogger.shared.info("Posting TrackFound + LibraryNeedsRefresh for: \(track.title)", category: "Import")
                 // Notify UI immediately that a new track was found
                 NotificationCenter.default.post(name: NSNotification.Name("TrackFound"), object: track)
+                NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
             }
             
             // Check if file is downloaded (for iCloud files)

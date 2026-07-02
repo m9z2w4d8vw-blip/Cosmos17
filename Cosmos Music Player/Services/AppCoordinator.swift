@@ -71,6 +71,10 @@ class AppCoordinator: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     
     private init() {
+        // Touching DebugLogger.shared here (not just from TutorialViewModel) guarantees
+        // Documents/DebugLogs/debug.log gets created on every app launch, regardless of
+        // whether the tutorial screen ever appears (e.g. HasCompletedTutorial already set).
+        DebugLogger.shared.info("AppCoordinator initialized", category: "App")
         setupBindings()
     }
     
