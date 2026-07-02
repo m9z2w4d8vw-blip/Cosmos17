@@ -1054,12 +1054,14 @@ struct TrackRowView: View, Equatable {
     }
     
     // 3. Equatable Conformance: Prevents redraws when PlayerEngine updates time
+    // Note: isFavorite/artworkImage are internal @State, not external params,
+    // so they're intentionally excluded here (comparing them would also
+    // require main-actor isolation, which conflicts with nonisolated Equatable).
     nonisolated static func == (lhs: TrackRowView, rhs: TrackRowView) -> Bool {
         return lhs.track.stableId == rhs.track.stableId &&
         lhs.activeTrackId == rhs.activeTrackId &&
         lhs.isAudioPlaying == rhs.isAudioPlaying &&
         lhs.artistName == rhs.artistName &&
-        lhs.isFavorite == rhs.isFavorite &&
         lhs.playlist?.id == rhs.playlist?.id
     }
 
