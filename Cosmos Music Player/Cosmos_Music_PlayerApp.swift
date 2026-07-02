@@ -28,6 +28,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     private func setupSiriIntegration() {
+        // NOTE: INVocabulary and INMediaUserContext both require the
+        // com.apple.developer.siri entitlement. Ad-hoc/unsigned builds
+        // (like this iOS 17 CI build) don't have that entitlement, and
+        // calling these APIs without it throws an uncatchable Objective-C
+        // NSException that aborts the process on every launch.
+        // If you build this with a real developer account that has the
+        // Siri capability enabled, you can restore the body below.
+        print("ℹ️ Skipping Siri vocabulary/media-context setup (requires com.apple.developer.siri entitlement, not present in this build)")
+        return
+
+        /* Original implementation - requires com.apple.developer.siri entitlement:
         DispatchQueue.global(qos: .userInitiated).async {
             // Set up vocabulary for playlists, artists, and albums
             Task { @MainActor in
@@ -64,6 +75,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 }
             }
         }
+        */
     }
 }
 
