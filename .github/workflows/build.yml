@@ -1,0 +1,68 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show available Xcode versions
+        run: ls /Applications | grep Xcode
+
+      - name: Select Xcode (latest available, needs Swift 6 support)
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "Cosmos Music Player.xcodeproj" \
+            -scheme "Cosmos Music Player"
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project "Cosmos Music Player.xcodeproj" \
+            -scheme "Cosmos Music Player" \
+            -archivePath "$RUNNER_TEMP/Cosmos.xcarchive" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Inject API keys as bundled .env (optional)
+        env:
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          DISCOGS_CONSUMER_KEY: ${{ secrets.DISCOGS_CONSUMER_KEY }}
+          DISCOGS_CONSUMER_SECRET: ${{ secrets.DISCOGS_CONSUMER_SECRET }}
+        run: |
+          APP_PATH="$RUNNER_TEMP/Cosmos.xcarchive/Products/Applications/Cosmos Music Player.app"
+          {
+            echo "SPOTIFY_CLIENT_ID=$SPOTIFY_CLIENT_ID"
+            echo "SPOTIFY_CLIENT_SECRET=$SPOTIFY_CLIENT_SECRET"
+            echo "DISCOGS_CONSUMER_KEY=$DISCOGS_CONSUMER_KEY"
+            echo "DISCOGS_CONSUMER_SECRET=$DISCOGS_CONSUMER_SECRET"
+          } > "$APP_PATH/.env"
+
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$RUNNER_TEMP/Cosmos.xcarchive/Products/Applications/Cosmos Music Player.app" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r CosmosMusicPlayer-unsigned.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CosmosMusicPlayer-unsigned-ipa
+          path: ${{ runner.temp }}/CosmosMusicPlayer-unsigned.ipa
