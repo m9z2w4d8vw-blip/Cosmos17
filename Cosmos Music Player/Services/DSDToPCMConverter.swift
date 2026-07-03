@@ -5,31 +5,44 @@
 //  Native DSD-to-PCM conversion for DSD rates SFBAudioEngine's built-in
 //  DSDPCMDecoder doesn't support (confirmed: SFBAudioEngine's DSD-to-PCM
 //  conversion is DSD64-only per its own README/feature list — see
-//  https://github.com/sbooth/SFBAudioEngine). This bypasses that limitation
-//  entirely by reading the raw 1-bit DSD stream directly from SFBAudioEngine's
-//  DSDDecoder (which decodes DSF/DSDIFF at ANY rate — only the built-in PCM
-//  converter is rate-limited) and running our own decimation filter.
+//  https://github.com/sbooth/SFBAudioEngine).
 //
-//  Strategy: convert the whole file to a cached temporary PCM (CAF) file once,
-//  then hand that file to the existing native AVAudioFile playback path
-//  unchanged. This avoids touching PlayerEngine's AVAudioEngine scheduling
-//  code, which is complex and already fragile — safer than trying to stream
-//  converted PCM live.
+//  This reads the DSF (DSD Stream File) container directly from disk and
+//  does not call SFBAudioEngine's DSDDecoder at all. Earlier versions of
+//  this file drove DSDDecoder.decode(into:count:) manually via a hand-built
+//  AVAudioCompressedBuffer, which crashed at the memory level, 100%
+//  reproducibly, at different points on different files/runs — a classic
+//  symptom of undefined behavior from calling an API outside its intended
+//  contract. SFBAudioEngine's own reference implementation (SimplePlayer)
+//  never drives DSDDecoder this way either: it always wraps it in the
+//  decorator classes DSDPCMDecoder/DoPDecoder, never touching raw packets
+//  directly. Since those decorators are exactly what's rate-limited to
+//  DSD64, driving the raw API ourselves isn't a supported path.
 //
-//  IMPORTANT — first-run calibration needed:
-//  The exact byte layout SFBAudioEngine's DSDDecoder hands back (interleaved
-//  vs planar, bit order within each byte) is asserted here based on Apple's
-//  documented native DSD format, but has NOT been verified against actual
-//  decoded output. DebugLogger calls below log the raw AVAudioFormat/
-//  streamDescription the decoder reports on first run — if playback comes out
-//  as noise, silence, or reversed channels, that log output is exactly what's
-//  needed to correct the unpacking logic in `unpackDSDBytes`.
+//  The DSF container format itself, by contrast, is a simple, stable, and
+//  publicly documented format (used unchanged for well over a decade by
+//  foobar2000, ffmpeg, dCS, and others), so parsing it directly here removes
+//  the dependency on any undocumented internal contract:
+//    "DSD " chunk (28 bytes) -> "fmt " chunk (52 bytes) -> "data" chunk
+//  Audio in the data chunk is block-interleaved (NOT sample-interleaved):
+//  `channelCount` consecutive fixed-size per-channel blocks (commonly 4096
+//  bytes each) form one group, repeating until EOF.
+//
+//  Strategy: convert the whole file to a cached temporary PCM (CAF) file
+//  once, then hand that file to the existing native AVAudioFile playback
+//  path unchanged — avoids touching PlayerEngine's AVAudioEngine scheduling
+//  code.
+//
+//  First-run calibration note: bit order within each byte (MSB vs LSB first)
+//  is read from the fmt chunk's bitsPerSample field per the DSF spec (1 =
+//  LSB-first, 8 = MSB-first) rather than assumed — but if playback still
+//  comes out as noise on a given file, that field is the first thing to
+//  double check against the "DSF header parsed" log line.
 //
 
 import Foundation
 import AVFoundation
 import Accelerate
-import SFBAudioEngine
 
 enum DSDConversionError: Error {
     case unsupportedChannelCount(Int)
@@ -101,45 +114,126 @@ final class DSDToPCMConverter {
         return outputURL
     }
 
+    /// Fixed-layout DSF container header, per the publicly documented DSF
+    /// (DSD Stream File) format spec — stable, widely implemented (ffmpeg,
+    /// foobar2000, dCS, etc.) and unrelated to SFBAudioEngine's internal API.
+    private struct DSFHeader {
+        let channelCount: Int
+        let dsdSampleRate: Double
+        let bitsPerSample: UInt32   // 1 = LSB-first bit order, 8 = MSB-first
+        let blockSizePerChannel: Int
+        let sampleCountPerChannel: UInt64
+        let dataOffset: UInt64
+        let dataSize: UInt64
+    }
+
+    private static func readUInt32LE(_ fh: FileHandle) throws -> UInt32 {
+        guard let d = try fh.read(upToCount: 4), d.count == 4 else {
+            throw DSDConversionError.conversionFailed("Unexpected EOF reading DSF header")
+        }
+        return d.withUnsafeBytes { $0.load(as: UInt32.self) }.littleEndian
+    }
+
+    private static func readUInt64LE(_ fh: FileHandle) throws -> UInt64 {
+        guard let d = try fh.read(upToCount: 8), d.count == 8 else {
+            throw DSDConversionError.conversionFailed("Unexpected EOF reading DSF header")
+        }
+        return d.withUnsafeBytes { $0.load(as: UInt64.self) }.littleEndian
+    }
+
+    private static func readChunkID(_ fh: FileHandle) throws -> String {
+        guard let d = try fh.read(upToCount: 4), d.count == 4 else {
+            throw DSDConversionError.conversionFailed("Unexpected EOF reading DSF header")
+        }
+        return String(data: d, encoding: .ascii) ?? "????"
+    }
+
+    /// Parses the DSF container directly from the file, bypassing
+    /// SFBAudioEngine's DSDDecoder entirely. Layout (all little-endian):
+    ///   "DSD " chunk (28 bytes): ckID, ckDataSize, fileSize, metadataOffset
+    ///   "fmt " chunk (52 bytes): ckID, ckDataSize, formatVersion, formatID,
+    ///     channelType, channelNum, samplingFrequency, bitsPerSample,
+    ///     sampleCount, blockSizePerChannel, reserved
+    ///   "data" chunk: ckID, ckDataSize, then raw sample data
+    private static func parseDSFHeader(_ fh: FileHandle) throws -> DSFHeader {
+        let dsdID = try readChunkID(fh)
+        guard dsdID == "DSD " else {
+            throw DSDConversionError.conversionFailed("Not a valid DSF file (expected 'DSD ' chunk, found '\(dsdID)')")
+        }
+        _ = try readUInt64LE(fh) // ckDataSize (28)
+        _ = try readUInt64LE(fh) // fileSize
+        _ = try readUInt64LE(fh) // metadataOffset
+
+        let fmtID = try readChunkID(fh)
+        guard fmtID == "fmt " else {
+            throw DSDConversionError.conversionFailed("Not a valid DSF file (expected 'fmt ' chunk, found '\(fmtID)')")
+        }
+        _ = try readUInt64LE(fh) // ckDataSize (52)
+        _ = try readUInt32LE(fh) // formatVersion
+        _ = try readUInt32LE(fh) // formatID
+        _ = try readUInt32LE(fh) // channelType
+        let channelNum = try readUInt32LE(fh)
+        let samplingFrequency = try readUInt32LE(fh)
+        let bitsPerSample = try readUInt32LE(fh)
+        let sampleCount = try readUInt64LE(fh)
+        let blockSizePerChannel = try readUInt32LE(fh)
+        _ = try readUInt32LE(fh) // reserved
+
+        let dataID = try readChunkID(fh)
+        guard dataID == "data" else {
+            throw DSDConversionError.conversionFailed("Not a valid DSF file (expected 'data' chunk, found '\(dataID)')")
+        }
+        let dataCkSize = try readUInt64LE(fh)
+        let dataOffset = fh.offsetInFile
+        let dataSize = dataCkSize >= 12 ? dataCkSize - 12 : 0
+
+        return DSFHeader(
+            channelCount: Int(channelNum),
+            dsdSampleRate: Double(samplingFrequency),
+            bitsPerSample: bitsPerSample,
+            blockSizePerChannel: Int(blockSizePerChannel),
+            sampleCountPerChannel: sampleCount,
+            dataOffset: dataOffset,
+            dataSize: dataSize
+        )
+    }
+
     private static func convert(sourceURL: URL, outputURL: URL) async throws {
         try await Task.detached(priority: .userInitiated) {
-            let decoder = try SFBAudioEngine.DSDDecoder(url: sourceURL)
-            do {
-                try decoder.open()
-            } catch {
-                throw DSDConversionError.decoderOpenFailed
+            guard sourceURL.pathExtension.lowercased() == "dsf" else {
+                throw DSDConversionError.conversionFailed("Direct parsing only supports .dsf (got .\(sourceURL.pathExtension)) — DSDIFF/.dff uses a different big-endian IFF container, not implemented here")
             }
-            defer { try? decoder.close() }
 
-            let sourceFormat = decoder.sourceFormat
-            let asbd = sourceFormat.streamDescription.pointee
-            let dsdSampleRate = asbd.mSampleRate
-            let channelCount = Int(asbd.mChannelsPerFrame)
-            let isInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+            guard let fileHandle = try? FileHandle(forReadingFrom: sourceURL) else {
+                throw DSDConversionError.conversionFailed("Could not open \(sourceURL.lastPathComponent) for reading")
+            }
+            defer { try? fileHandle.close() }
 
+            let header = try parseDSFHeader(fileHandle)
             DebugLogger.shared.info(
-                "DSDDecoder sourceFormat for \(sourceURL.lastPathComponent): sampleRate=\(dsdSampleRate), channels=\(channelCount), bytesPerPacket=\(asbd.mBytesPerPacket), bytesPerFrame=\(asbd.mBytesPerFrame), interleaved=\(isInterleaved), formatFlags=\(asbd.mFormatFlags)",
+                "DSF header parsed for \(sourceURL.lastPathComponent): channels=\(header.channelCount), dsdSampleRate=\(header.dsdSampleRate), bitsPerSample=\(header.bitsPerSample), blockSizePerChannel=\(header.blockSizePerChannel), sampleCountPerChannel=\(header.sampleCountPerChannel), dataOffset=\(header.dataOffset), dataSize=\(header.dataSize)",
                 category: "Playback"
             )
 
+            let channelCount = header.channelCount
             guard channelCount == 1 || channelCount == 2 else {
                 throw DSDConversionError.unsupportedChannelCount(channelCount)
             }
+            guard header.blockSizePerChannel > 0 else {
+                throw DSDConversionError.conversionFailed("Invalid blockSizePerChannel (0) in DSF header")
+            }
 
+            let dsdSampleRate = header.dsdSampleRate
             let decimationRatio = Int((dsdSampleRate / targetOutputSampleRate).rounded())
             guard decimationRatio >= 2 else {
                 throw DSDConversionError.conversionFailed("Computed decimation ratio < 2 (dsdSampleRate=\(dsdSampleRate)) — refusing to convert")
             }
             let outputSampleRate = dsdSampleRate / Double(decimationRatio)
-
             DebugLogger.shared.info("DSD conversion plan: decimationRatio=\(decimationRatio), outputSampleRate=\(outputSampleRate)", category: "Playback")
 
-            // Output file: 32-bit float PCM CAF, same channel count/layout as source
-            DebugLogger.shared.info("DSD conversion step: creating output AVAudioFormat", category: "Playback")
             guard let outputFormat = AVAudioFormat(standardFormatWithSampleRate: outputSampleRate, channels: AVAudioChannelCount(channelCount)) else {
                 throw DSDConversionError.outputFileCreationFailed
             }
-            DebugLogger.shared.info("DSD conversion step: creating output AVAudioFile at \(outputURL.lastPathComponent)", category: "Playback")
             let outputFile: AVAudioFile
             do {
                 outputFile = try AVAudioFile(forWriting: outputURL, settings: outputFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -147,123 +241,76 @@ final class DSDToPCMConverter {
                 throw DSDConversionError.conversionFailed("Failed to create output file: \(error)")
             }
 
-            DebugLogger.shared.info("DSD conversion step: creating \(channelCount) DSDDecimator instance(s)", category: "Playback")
             let decimators = (0..<channelCount).map { _ in DSDDecimator(decimationRatio: decimationRatio) }
-            DebugLogger.shared.info("DSD conversion step: decimators created OK", category: "Playback")
+            // Per the DSF spec, bitsPerSample here means bit ORDER within each
+            // byte, not sample width (every DSD sample is inherently 1 bit):
+            // 1 = LSB-first, 8 = MSB-first.
+            let msbFirst = header.bitsPerSample != 1
 
-            // Read DSD in chunks. IMPORTANT: `maximumPacketSize` must be large
-            // enough for whatever SFBAudioEngine's real DSD packet size is —
-            // if decode() writes more bytes per packet than we allocated,
-            // it overflows this buffer and crashes at the memory level
-            // (unrecoverable, invisible to Swift's error handling, and
-            // exactly the failure mode observed: instant, silent crash
-            // inside decode() itself, before any of our own code runs).
-            //
-            // We don't have confirmed access to SFBAudioEngine's actual DSD
-            // packet-size contract. DSF files store audio in per-channel
-            // blocks that are commonly 4096 bytes each — if a "packet" here
-            // corresponds to one such block, our old assumption of 1
-            // byte/channel/packet undersized the buffer by ~2000x, which
-            // matches a hard, instant, 100%-reproducible crash. Rather than
-            // guess the exact number, size generously oversized (16KB/packet)
-            // so decode() cannot overflow it regardless of the real layout,
-            // and let the diagnostic log + guard below (which run safely
-            // *after* decode() returns) reveal the real relationship instead
-            // of us crashing while guessing.
-            let packetsPerChunk: AVAudioPacketCount = 256
-            let bytesPerPacketPerChannel = 1
-            let maxPacketSizeSafetyMargin = 16384
-            DebugLogger.shared.info("DSD conversion step: allocating AVAudioCompressedBuffer (packetCapacity=\(packetsPerChunk), maximumPacketSize=\(maxPacketSizeSafetyMargin))", category: "Playback")
-            let compressedBuffer = AVAudioCompressedBuffer(
-                format: sourceFormat,
-                packetCapacity: packetsPerChunk,
-                maximumPacketSize: maxPacketSizeSafetyMargin
-            )
-            DebugLogger.shared.info("DSD conversion step: AVAudioCompressedBuffer allocated OK, entering decode loop", category: "Playback")
+            // DSF data is NOT sample-interleaved — it's block-interleaved:
+            // `channelCount` consecutive fixed-size per-channel blocks
+            // (blockSizePerChannel bytes, typically 4096) form one "group",
+            // then the next group follows. Read several groups per pass to
+            // keep memory bounded on very long tracks.
+            let blockSize = header.blockSizePerChannel
+            let groupsPerRead = 8
+            let groupSizeBytes = blockSize * channelCount
+            let readChunkSizeBytes = groupSizeBytes * groupsPerRead
 
-            var totalPacketsDecoded: Int64 = 0
-            let assumedBytesPerPacket = bytesPerPacketPerChannel * (isInterleaved ? channelCount : 1)
-            let allocatedCapacityBytes = Int(packetsPerChunk) * assumedBytesPerPacket
+            try fileHandle.seek(toOffset: header.dataOffset)
+            var bytesRemaining = header.dataSize
+            var totalDSDBytesProcessed: Int64 = 0
             var loggedFirstChunkDiagnostics = false
 
-            while true {
+            while bytesRemaining > 0 {
                 try Task.checkCancellation()
-                compressedBuffer.byteLength = 0
-                compressedBuffer.packetCount = 0
+                let thisReadSize = min(UInt64(readChunkSizeBytes), bytesRemaining)
+                guard let chunkData = try fileHandle.read(upToCount: Int(thisReadSize)), !chunkData.isEmpty else {
+                    break
+                }
+                bytesRemaining -= UInt64(chunkData.count)
 
-                if totalPacketsDecoded == 0 {
-                    DebugLogger.shared.info("DSD conversion step: about to call decoder.decode(count: \(packetsPerChunk)) for the first time", category: "Playback")
-                }
-                do {
-                    try decoder.decode(into: compressedBuffer, count: packetsPerChunk)
-                } catch {
-                    DebugLogger.shared.error("DSDDecoder.decode failed mid-stream for \(sourceURL.lastPathComponent) after \(totalPacketsDecoded) packets: \(error)", category: "Playback")
-                    throw error
-                }
-                if totalPacketsDecoded == 0 {
-                    DebugLogger.shared.info("DSD conversion step: first decoder.decode() call returned successfully", category: "Playback")
+                let fullGroups = chunkData.count / groupSizeBytes
+                guard fullGroups > 0 else { break }
+
+                var perChannelBits = [[Float]](repeating: [], count: channelCount)
+                for ch in 0..<channelCount {
+                    perChannelBits[ch].reserveCapacity(fullGroups * blockSize * 8)
                 }
 
-                let packetsRead = Int(compressedBuffer.packetCount)
-                let actualByteLength = Int(compressedBuffer.byteLength)
+                chunkData.withUnsafeBytes { (rawPtr: UnsafeRawBufferPointer) in
+                    let bytePtr = rawPtr.bindMemory(to: UInt8.self)
+                    for g in 0..<fullGroups {
+                        let groupBase = g * groupSizeBytes
+                        for ch in 0..<channelCount {
+                            let chBase = groupBase + ch * blockSize
+                            for i in 0..<blockSize {
+                                appendBits(bytePtr[chBase + i], msbFirst: msbFirst, to: &perChannelBits[ch])
+                            }
+                        }
+                    }
+                }
 
-                // First-chunk diagnostic: dump the real relationship between packetCount
-                // and byteLength before we trust our own assumed layout for anything.
                 if !loggedFirstChunkDiagnostics {
                     loggedFirstChunkDiagnostics = true
                     DebugLogger.shared.info(
-                        "DSD first chunk diagnostics: packetsRead=\(packetsRead), byteLength=\(actualByteLength), assumedBytesPerPacket=\(assumedBytesPerPacket), impliedBytesPerPacket=\(packetsRead > 0 ? Double(actualByteLength) / Double(packetsRead) : 0), allocatedCapacityBytes=\(allocatedCapacityBytes)",
+                        "DSD first chunk diagnostics: readBytes=\(chunkData.count), fullGroups=\(fullGroups), blockSize=\(blockSize), bitsUnpackedPerChannel=\(perChannelBits[0].count)",
                         category: "Playback"
                     )
                 }
 
-                // Safety guard: our unpacking math below assumes byteLength ==
-                // packetsRead * assumedBytesPerPacket. If SFBAudioEngine's real
-                // packet layout differs, indexing into dataPtr with our own offset
-                // math could walk past the actually-valid (or even allocated)
-                // region — which crashes at the memory level with no catchable
-                // Swift error. Verify the relationship holds before touching
-                // dataPtr at all; if it doesn't, fail loudly and safely instead.
-                let expectedByteLength = packetsRead * assumedBytesPerPacket
-                guard actualByteLength == expectedByteLength else {
-                    DebugLogger.shared.error(
-                        "DSD layout assumption mismatch for \(sourceURL.lastPathComponent): expected byteLength=\(expectedByteLength) (packetsRead=\(packetsRead) x assumedBytesPerPacket=\(assumedBytesPerPacket)) but decoder reported byteLength=\(actualByteLength). Refusing to read raw buffer to avoid out-of-bounds access.",
-                        category: "Playback"
-                    )
-                    throw DSDConversionError.conversionFailed("DSD packet layout assumption mismatch — expected \(expectedByteLength) bytes, decoder reported \(actualByteLength) bytes. See debug log for details.")
-                }
-                guard actualByteLength <= allocatedCapacityBytes else {
-                    DebugLogger.shared.error(
-                        "DSD byteLength exceeds allocated buffer capacity for \(sourceURL.lastPathComponent): byteLength=\(actualByteLength) > allocatedCapacityBytes=\(allocatedCapacityBytes)",
-                        category: "Playback"
-                    )
-                    throw DSDConversionError.conversionFailed("DSD decoder reported byteLength larger than allocated buffer capacity — see debug log.")
-                }
+                totalDSDBytesProcessed += Int64(fullGroups * groupSizeBytes)
 
-                if packetsRead == 0 {
-                    break // EOF
-                }
-                totalPacketsDecoded += Int64(packetsRead)
-
-                // Unpack raw DSD bytes -> per-channel bipolar Float32 sample arrays
-                let channelSamples = unpackDSDBytes(
-                    compressedBuffer: compressedBuffer,
-                    packetCount: packetsRead,
-                    channelCount: channelCount,
-                    interleaved: isInterleaved
-                )
-
-                // Decimate each channel and write interleaved-free (planar) PCM buffer
-                var decimatedChannels: [[Float]] = []
+                var decimatedChannels = [[Float]](repeating: [], count: channelCount)
                 for ch in 0..<channelCount {
-                    decimatedChannels.append(decimators[ch].process(channelSamples[ch]))
+                    decimatedChannels[ch] = decimators[ch].process(perChannelBits[ch])
                 }
 
-                let frameCount = decimatedChannels.first?.count ?? 0
+                let frameCount = decimatedChannels.map { $0.count }.min() ?? 0
                 guard frameCount > 0 else { continue }
 
                 guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: outputFile.processingFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
-                    throw DSDConversionError.conversionFailed("Failed to allocate PCM buffer")
+                    throw DSDConversionError.conversionFailed("Failed to allocate output PCM buffer")
                 }
                 pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
                 for ch in 0..<channelCount {
@@ -280,59 +327,25 @@ final class DSDToPCMConverter {
                 }
             }
 
-            DebugLogger.shared.info("DSD conversion wrote \(totalPacketsDecoded) DSD packets -> \(outputURL.lastPathComponent)", category: "Playback")
+            DebugLogger.shared.info("DSD conversion processed \(totalDSDBytesProcessed) raw DSD bytes -> \(outputURL.lastPathComponent)", category: "Playback")
         }.value
     }
 
-    /// Unpacks raw DSD bytes from a compressed buffer into per-channel arrays
-    /// of bipolar Float32 samples (bit=1 -> +1.0, bit=0 -> -1.0), MSB-first,
-    /// per Apple's documented native DSD byte layout. ASSUMPTION: interleaved
-    /// byte-per-channel ordering when `interleaved == true` (byte 0 = ch0's
-    /// 8 samples, byte 1 = ch1's 8 samples, byte 2 = ch0's next 8 samples...).
-    /// Verify against the DebugLogger format dump above if output sounds wrong.
-    private static func unpackDSDBytes(
-        compressedBuffer: AVAudioCompressedBuffer,
-        packetCount: Int,
-        channelCount: Int,
-        interleaved: Bool
-    ) -> [[Float]] {
-        var result = [[Float]](repeating: [], count: channelCount)
-        for ch in 0..<channelCount {
-            result[ch].reserveCapacity(packetCount * 8)
-        }
-
-        let dataPtr = compressedBuffer.data.assumingMemoryBound(to: UInt8.self)
-
-        if interleaved {
-            // packetCount total packets, one byte per channel per packet, channels interleaved
-            var offset = 0
-            for _ in 0..<packetCount {
-                for ch in 0..<channelCount {
-                    let byte = dataPtr[offset]
-                    offset += 1
-                    appendBits(byte, to: &result[ch])
-                }
+    @inline(__always)
+    private static func appendBits(_ byte: UInt8, msbFirst: Bool, to array: inout [Float]) {
+        var b = byte
+        if msbFirst {
+            for _ in 0..<8 {
+                let bit = (b & 0x80) != 0
+                array.append(bit ? 1.0 : -1.0)
+                b <<= 1
             }
         } else {
-            // Planar: each channel's bytes are contiguous
-            for ch in 0..<channelCount {
-                let base = ch * packetCount
-                for i in 0..<packetCount {
-                    appendBits(dataPtr[base + i], to: &result[ch])
-                }
+            for _ in 0..<8 {
+                let bit = (b & 0x01) != 0
+                array.append(bit ? 1.0 : -1.0)
+                b >>= 1
             }
-        }
-        return result
-    }
-
-    @inline(__always)
-    private static func appendBits(_ byte: UInt8, to array: inout [Float]) {
-        // MSB-first per Apple's native DSD format documentation
-        var b = byte
-        for _ in 0..<8 {
-            let bit = (b & 0x80) != 0
-            array.append(bit ? 1.0 : -1.0)
-            b <<= 1
         }
     }
 }
