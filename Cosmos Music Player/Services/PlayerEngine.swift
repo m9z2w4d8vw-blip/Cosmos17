@@ -1742,10 +1742,12 @@ class PlayerEngine: NSObject, ObservableObject {
         guard !inFlightPrefetches.contains(track.stableId) else { return }
         inFlightPrefetches.insert(track.stableId)
 
-        Task.detached(priority: .utility) { [weak self] in
-            defer {
-                Task { @MainActor in self?.inFlightPrefetches.remove(track.stableId) }
-            }
+        // PlayerEngine is already @MainActor, so a plain Task here inherits
+        // that isolation — no need for Task.detached or a nested inner Task
+        // to hop back for the cleanup line. After `await` returns we're back
+        // on MainActor automatically, so touching inFlightPrefetches directly
+        // below is safe without any extra actor-hopping ceremony.
+        Task { [weak self] in
             do {
                 _ = try await DSDToPCMConverter.convertedFileURL(forDSDFileAt: url)
                 DebugLogger.shared.info("Prefetched DSD conversion for \(track.title)", category: "Playback")
@@ -1754,6 +1756,7 @@ class PlayerEngine: NSObject, ObservableObject {
                 // will surface and log a real error if conversion is still
                 // failing when the user actually presses play.
             }
+            self?.inFlightPrefetches.remove(track.stableId)
         }
     }
 
