@@ -139,10 +139,12 @@ struct AlbumDetailScreen: View {
     let album: Album
     let allTracks: [Track]
     @EnvironmentObject private var appCoordinator: AppCoordinator
+    @Environment(\.dismiss) private var dismiss
     @State private var artworkImage: UIImage?
     @State private var settings = DeleteSettings.load()
     @State private var albumTracks: [Track] = []
     @State private var artistNameCache: [Int64: String] = [:]
+    @State private var showEditSheet = false
 
     private var playerEngine: PlayerEngine {
         appCoordinator.playerEngine
@@ -325,6 +327,25 @@ struct AlbumDetailScreen: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showEditSheet = true
+                } label: {
+                    Image(systemName: "pencil")
+                }
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            AlbumMetadataEditView(album: album, tracks: albumTracks) {
+                // Album title/artist changed — this screen's data no longer
+                // matches what's on disk, and re-fetching in place would add
+                // a fair bit of state-juggling for a rarely-used edit flow.
+                // Simplest correct behavior: pop back to the album list,
+                // which reloads fresh from the database.
+                dismiss()
+            }
+        }
         .onAppear {
             loadArtistNameCache()
             loadAlbumTracks()
@@ -561,6 +582,137 @@ struct ArtistDetailScreenWrapper: View {
         } catch {
             print("Failed to load artist: \(error)")
             artist = Artist(id: nil, name: artistName)
+        }
+    }
+}
+
+// MARK: - Album Metadata Editing
+
+struct AlbumMetadataEditView: View {
+    let album: Album
+    let tracks: [Track]
+    var onSaved: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var titleText: String
+    @State private var artistText: String
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+
+    init(album: Album, tracks: [Track], onSaved: @escaping () -> Void) {
+        self.album = album
+        self.tracks = tracks
+        self.onSaved = onSaved
+        _titleText = State(initialValue: album.title)
+        let initialArtist = (album.albumArtist?.isEmpty == false) ? album.albumArtist! : ""
+        _artistText = State(initialValue: initialArtist)
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Album")) {
+                    TextField("Album Title", text: $titleText)
+                        .disabled(isSaving)
+                    TextField("Artist", text: $artistText)
+                        .disabled(isSaving)
+                }
+
+                Section {
+                    Text("This updates the tags in each track's file (so it matches in Apple Music, Finder, or other players), plus Cosmos's library. \(nonDSFTrackCount > 0 ? "\(nonDSFTrackCount) track(s) in this album aren't .dsf files — those will be updated in the library only, since native tag writing currently supports .dsf." : "")")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+            .navigationTitle("Edit Album")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if isSaving {
+                        ProgressView()
+                    } else {
+                        Button("Save") {
+                            Task { await save() }
+                        }
+                        .disabled(titleText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    private var nonDSFTrackCount: Int {
+        tracks.filter { URL(fileURLWithPath: $0.path).pathExtension.lowercased() != "dsf" }.count
+    }
+
+    @MainActor
+    private func save() async {
+        let newTitle = titleText.trimmingCharacters(in: .whitespaces)
+        let newArtistName = artistText.trimmingCharacters(in: .whitespaces)
+        let newArtist: String? = newArtistName.isEmpty ? nil : newArtistName
+
+        isSaving = true
+        errorMessage = nil
+        defer { isSaving = false }
+
+        var fileWriteFailures: [String] = []
+        do {
+            guard let albumId = album.id else {
+                throw DSFMetadataWriterError.ioError("Album has no database id")
+            }
+            let artistRow = try newArtist.map { try DatabaseManager.shared.upsertArtist(name: $0) }
+
+            try DatabaseManager.shared.updateAlbumMetadata(
+                albumId: albumId,
+                title: newTitle,
+                albumArtist: newArtist,
+                artistId: artistRow?.id
+            )
+            try DatabaseManager.shared.setAlbumArtists(albumId: albumId, artistIds: artistRow?.id.map { [$0] } ?? [])
+
+            for track in tracks {
+                try? DatabaseManager.shared.updateTrackArtist(trackStableId: track.stableId, artistId: artistRow?.id)
+                if let artistId = artistRow?.id {
+                    try? DatabaseManager.shared.setTrackArtists(trackStableId: track.stableId, artistIds: [artistId])
+                }
+
+                let ext = URL(fileURLWithPath: track.path).pathExtension.lowercased()
+                guard ext == "dsf" else {
+                    continue // library already updated above; file tag writing not yet supported for this format
+                }
+                do {
+                    try DSFMetadataWriter.writeTags(
+                        to: URL(fileURLWithPath: track.path),
+                        artist: newArtist,
+                        album: newTitle,
+                        albumArtist: newArtist
+                    )
+                } catch {
+                    fileWriteFailures.append("\(track.title): \(error.localizedDescription)")
+                }
+            }
+
+            NotificationCenter.default.post(name: NSNotification.Name("LibraryNeedsRefresh"), object: nil)
+
+            if fileWriteFailures.isEmpty {
+                onSaved()
+            } else {
+                errorMessage = "Library updated, but some files couldn't be tagged:\n" + fileWriteFailures.joined(separator: "\n")
+            }
+        } catch {
+            errorMessage = "Failed to save: \(error.localizedDescription)"
         }
     }
 }

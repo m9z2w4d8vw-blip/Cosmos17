@@ -594,6 +594,28 @@ class DatabaseManager: @unchecked Sendable {
         }
     }
     
+    func updateAlbumMetadata(albumId: Int64, title: String, albumArtist: String?, artistId: Int64?) throws {
+        print("✏️ Database: Updating album \(albumId) metadata — title='\(title)', albumArtist='\(albumArtist ?? "nil")'")
+        let updatedCount = try write { db in
+            return try Album
+                .filter(Column("id") == albumId)
+                .updateAll(db,
+                    Column("title").set(to: title),
+                    Column("album_artist").set(to: albumArtist),
+                    Column("artist_id").set(to: artistId)
+                )
+        }
+        print("✏️ Database: Updated \(updatedCount) album row(s)")
+    }
+
+    func updateTrackArtist(trackStableId: String, artistId: Int64?) throws {
+        _ = try write { db in
+            return try Track
+                .filter(Column("stable_id") == trackStableId)
+                .updateAll(db, Column("artist_id").set(to: artistId))
+        }
+    }
+
     // MARK: - Artist operations
     
     func upsertArtist(name: String) throws -> Artist {
