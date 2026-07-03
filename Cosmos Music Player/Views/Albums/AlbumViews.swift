@@ -1,5 +1,6 @@
 import SwiftUI
 import GRDB
+import PhotosUI
 
 struct AlbumsScreen: View {
     let allTracks: [Track]
@@ -587,17 +588,34 @@ struct ArtistDetailScreenWrapper: View {
 }
 
 // MARK: - Album Metadata Editing
-
 struct AlbumMetadataEditView: View {
     let album: Album
     let tracks: [Track]
     var onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+
     @State private var titleText: String
     @State private var artistText: String
     @State private var isSaving = false
     @State private var errorMessage: String?
+
+    // Artist autocomplete
+    @State private var artistSuggestions: [ITunesArtist] = []
+    @State private var isSearchingArtists = false
+    @State private var artistSearchTask: Task<Void, Never>?
+    @State private var artistFieldFocused = false
+
+    // Apple Music album matching
+    @State private var albumSuggestions: [ITunesAlbum] = []
+    @State private var isSearchingAlbums = false
+    @State private var matchedAlbum: ITunesAlbum?
+
+    // Cover art
+    @State private var artworkPreview: UIImage?
+    @State private var pendingArtworkJPEGData: Data?
+    @State private var isFetchingArtwork = false
+    @State private var photosPickerItem: PhotosPickerItem?
 
     init(album: Album, tracks: [Track], onSaved: @escaping () -> Void) {
         self.album = album
@@ -611,11 +629,128 @@ struct AlbumMetadataEditView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section(header: Text("Cover Art")) {
+                    HStack(spacing: 16) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.2))
+                            .frame(width: 72, height: 72)
+                            .overlay {
+                                if isFetchingArtwork {
+                                    ProgressView()
+                                } else if let artworkPreview {
+                                    Image(uiImage: artworkPreview)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 72, height: 72)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                } else {
+                                    Image(systemName: "music.note")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            PhotosPicker(selection: $photosPickerItem, matching: .images) {
+                                Text("Choose Photo")
+                            }
+                            if pendingArtworkJPEGData != nil {
+                                Button("Remove New Cover", role: .destructive) {
+                                    pendingArtworkJPEGData = nil
+                                    artworkPreview = nil
+                                }
+                                .font(.footnote)
+                            }
+                        }
+                        Spacer()
+                    }
+                    .onChange(of: photosPickerItem) { _, newItem in
+                        guard let newItem else { return }
+                        Task { await loadPickedPhoto(newItem) }
+                    }
+                }
+
                 Section(header: Text("Album")) {
                     TextField("Album Title", text: $titleText)
                         .disabled(isSaving)
-                    TextField("Artist", text: $artistText)
-                        .disabled(isSaving)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        TextField("Artist", text: $artistText)
+                            .disabled(isSaving)
+                            .onChange(of: artistText) { _, newValue in
+                                scheduleArtistSearch(for: newValue)
+                            }
+
+                        if isSearchingArtists {
+                            HStack {
+                                ProgressView().scaleEffect(0.7)
+                                Text("Searching…").font(.footnote).foregroundColor(.secondary)
+                            }
+                            .padding(.top, 4)
+                        } else if !artistSuggestions.isEmpty {
+                            ForEach(artistSuggestions) { suggestion in
+                                Button {
+                                    selectArtist(suggestion)
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "person.crop.circle")
+                                            .foregroundColor(.secondary)
+                                        Text(suggestion.artistName)
+                                            .foregroundColor(.primary)
+                                        Spacer()
+                                    }
+                                }
+                                .padding(.top, 6)
+                            }
+                        }
+                    }
+                }
+
+                if isSearchingAlbums {
+                    Section(header: Text("Matching Apple Music Albums")) {
+                        HStack {
+                            ProgressView().scaleEffect(0.7)
+                            Text("Looking up albums…").font(.footnote).foregroundColor(.secondary)
+                        }
+                    }
+                } else if !albumSuggestions.isEmpty {
+                    Section(header: Text("Match Apple Music Album")) {
+                        ForEach(albumSuggestions) { candidate in
+                            Button {
+                                selectAlbum(candidate)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    AsyncImage(url: URL(string: candidate.artworkUrl100 ?? "")) { phase in
+                                        if let image = phase.image {
+                                            image.resizable().aspectRatio(contentMode: .fill)
+                                        } else {
+                                            Rectangle().fill(Color.gray.opacity(0.2))
+                                        }
+                                    }
+                                    .frame(width: 44, height: 44)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(candidate.collectionName)
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        HStack(spacing: 4) {
+                                            Text(candidate.artistName)
+                                            if let year = candidate.year {
+                                                Text("· \(String(year))")
+                                            }
+                                        }
+                                        .font(.footnote)
+                                        .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    if matchedAlbum?.id == candidate.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.accentColor)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Section {
@@ -657,11 +792,115 @@ struct AlbumMetadataEditView: View {
         tracks.filter { URL(fileURLWithPath: $0.path).pathExtension.lowercased() != "dsf" }.count
     }
 
+    // MARK: - Artist autocomplete
+
+    private func scheduleArtistSearch(for text: String) {
+        artistSearchTask?.cancel()
+        matchedAlbum = nil
+        albumSuggestions = []
+
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2 else {
+            artistSuggestions = []
+            isSearchingArtists = false
+            return
+        }
+
+        artistSearchTask = Task {
+            isSearchingArtists = true
+            try? await Task.sleep(nanoseconds: 350_000_000) // debounce while typing
+            guard !Task.isCancelled else { return }
+            do {
+                let results = try await AppleMusicLookupService.searchArtists(term: trimmed)
+                guard !Task.isCancelled else { return }
+                artistSuggestions = results
+            } catch {
+                artistSuggestions = []
+            }
+            isSearchingArtists = false
+        }
+    }
+
+    private func selectArtist(_ suggestion: ITunesArtist) {
+        artistText = suggestion.artistName
+        artistSuggestions = []
+        artistSearchTask?.cancel()
+        loadAlbums(forArtist: suggestion.artistName)
+    }
+
+    // MARK: - Album matching
+
+    private func loadAlbums(forArtist artistName: String) {
+        isSearchingAlbums = true
+        albumSuggestions = []
+        Task {
+            do {
+                let results = try await AppleMusicLookupService.searchAlbums(artistName: artistName)
+                albumSuggestions = results
+            } catch {
+                albumSuggestions = []
+            }
+            isSearchingAlbums = false
+        }
+    }
+
+    private func selectAlbum(_ candidate: ITunesAlbum) {
+        matchedAlbum = candidate
+        titleText = candidate.collectionName
+        artistText = candidate.artistName
+
+        guard let artworkURL = candidate.highResArtworkURL else { return }
+        isFetchingArtwork = true
+        Task {
+            do {
+                let data = try await AppleMusicLookupService.downloadArtworkJPEGData(from: artworkURL)
+                if let image = UIImage(data: data) {
+                    artworkPreview = image
+                    pendingArtworkJPEGData = data
+                }
+            } catch {
+                // Non-fatal — the title/artist match still applies even if artwork fails to download
+            }
+            isFetchingArtwork = false
+        }
+    }
+
+    // MARK: - Manual photo picking
+
+    private func loadPickedPhoto(_ item: PhotosPickerItem) async {
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let image = UIImage(data: data) else { return }
+
+        // Re-encode as JPEG at a sane size — photo library assets can be
+        // very large (HEIC, multiple MB), which would bloat every track's
+        // tag unnecessarily.
+        let resized = resizedForArtwork(image)
+        guard let jpegData = resized.jpegData(compressionQuality: 0.85) else { return }
+
+        artworkPreview = resized
+        pendingArtworkJPEGData = jpegData
+    }
+
+    private func resizedForArtwork(_ image: UIImage, maxDimension: CGFloat = 1200) -> UIImage {
+        let size = image.size
+        let largestSide = max(size.width, size.height)
+        guard largestSide > maxDimension else { return image }
+        let scale = maxDimension / largestSide
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
+    // MARK: - Save
+
     @MainActor
     private func save() async {
         let newTitle = titleText.trimmingCharacters(in: .whitespaces)
         let newArtistName = artistText.trimmingCharacters(in: .whitespaces)
         let newArtist: String? = newArtistName.isEmpty ? nil : newArtistName
+        let newYear = matchedAlbum?.year
 
         isSaving = true
         errorMessage = nil
@@ -697,8 +936,13 @@ struct AlbumMetadataEditView: View {
                         to: URL(fileURLWithPath: track.path),
                         artist: newArtist,
                         album: newTitle,
-                        albumArtist: newArtist
+                        albumArtist: newArtist,
+                        year: newYear,
+                        artworkJPEGData: pendingArtworkJPEGData
                     )
+                    if pendingArtworkJPEGData != nil {
+                        try? DatabaseManager.shared.updateTrackHasEmbeddedArt(trackStableId: track.stableId, hasEmbeddedArt: true)
+                    }
                 } catch {
                     fileWriteFailures.append("\(track.title): \(error.localizedDescription)")
                 }

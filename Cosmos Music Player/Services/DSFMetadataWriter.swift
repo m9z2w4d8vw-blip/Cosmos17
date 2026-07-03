@@ -68,7 +68,8 @@ enum DSFMetadataWriter {
         albumArtist: String? = nil,
         trackNumber: Int? = nil,
         discNumber: Int? = nil,
-        year: Int? = nil
+        year: Int? = nil,
+        artworkJPEGData: Data? = nil
     ) throws {
         guard url.pathExtension.lowercased() == "dsf" else {
             throw DSFMetadataWriterError.notADSFFile
@@ -125,6 +126,7 @@ enum DSFMetadataWriter {
         if trackNumber != nil { overwrittenIDs.insert("TRCK") }
         if discNumber != nil { overwrittenIDs.insert("TPOS") }
         if year != nil { overwrittenIDs.insert("TYER") }
+        if artworkJPEGData != nil { overwrittenIDs.insert("APIC") } // replace ALL existing pictures with the new one
         preservedFrames.removeAll { overwrittenIDs.contains($0.id) }
 
         var newFrames: [Frame] = []
@@ -135,6 +137,7 @@ enum DSFMetadataWriter {
         if let trackNumber { newFrames.append(textFrame(id: "TRCK", value: String(trackNumber))) }
         if let discNumber { newFrames.append(textFrame(id: "TPOS", value: String(discNumber))) }
         if let year { newFrames.append(textFrame(id: "TYER", value: String(year))) }
+        if let artworkJPEGData { newFrames.append(artworkFrame(jpegData: artworkJPEGData)) }
 
         let allFrames = preservedFrames + newFrames
         let tagBody = allFrames.map { serializeFrame($0) }.reduce(Data(), +)
@@ -220,6 +223,19 @@ enum DSFMetadataWriter {
         var payload = Data([0x03]) // encoding: UTF-8
         payload.append(contentsOf: value.utf8)
         return Frame(id: id, payload: payload)
+    }
+
+    /// Builds an APIC (attached picture) frame. Picture type 3 = "Cover
+    /// (front)", the type virtually every player (including Apple Music)
+    /// looks for as the primary album artwork.
+    private static func artworkFrame(jpegData: Data) -> Frame {
+        var payload = Data([0x00]) // encoding: ISO-8859-1 (ASCII-safe for the MIME string below)
+        payload.append(contentsOf: "image/jpeg".utf8)
+        payload.append(0x00) // MIME type terminator
+        payload.append(0x03) // picture type: front cover
+        payload.append(0x00) // empty description, terminator only
+        payload.append(jpegData)
+        return Frame(id: "APIC", payload: payload)
     }
 
     private static func serializeFrame(_ frame: Frame) -> Data {

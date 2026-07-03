@@ -616,6 +616,14 @@ class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    func updateTrackHasEmbeddedArt(trackStableId: String, hasEmbeddedArt: Bool) throws {
+        _ = try write { db in
+            return try Track
+                .filter(Column("stable_id") == trackStableId)
+                .updateAll(db, Column("has_embedded_art").set(to: hasEmbeddedArt))
+        }
+    }
+
     // MARK: - Artist operations
     
     func upsertArtist(name: String) throws -> Artist {
