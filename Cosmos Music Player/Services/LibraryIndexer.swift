@@ -2079,11 +2079,25 @@ class AudioMetadataParser {
             let filename = url.deletingPathExtension().lastPathComponent
             title = filename
 
-            // Try to parse "Artist - Title" format
-            let components = filename.components(separatedBy: " - ")
-            if components.count >= 2 {
-                artist = components[0].trimmingCharacters(in: .whitespaces)
-                title = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespaces)
+            // Only guess "Artist - Title" from the filename when the name
+            // doesn't already look like a per-track rip filename (e.g.
+            // "A1 ", "D3 ", "12 " prefixes from ripping software). Files in
+            // that style are just one song's title — which can legitimately
+            // contain its own " - " (e.g. "... To Have - But I Have It") —
+            // and blindly splitting on it invents a bogus "artist" unique to
+            // that one file, which then spins off its own separate album
+            // grouping instead of joining the rest of the tracks.
+            let looksLikeTrackNumberedFilename = filename.range(
+                of: #"^[A-Za-z]?\d{1,3}[\s._-]"#,
+                options: .regularExpression
+            ) != nil
+
+            if !looksLikeTrackNumberedFilename {
+                let components = filename.components(separatedBy: " - ")
+                if components.count >= 2 {
+                    artist = components[0].trimmingCharacters(in: .whitespaces)
+                    title = components.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespaces)
+                }
             }
         }
 
