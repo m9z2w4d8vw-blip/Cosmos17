@@ -497,9 +497,22 @@ struct PlayerView: View {
                 playerEngine.play()
             }
         }) {
-            Image(systemName: playerEngine.isPlaying ? "pause.fill" : "play.fill")
-                .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title : .largeTitle)
+            if playerEngine.playbackState == .loading {
+                // Previously this button kept showing the plain Play icon
+                // during DSD conversion (which can take several seconds),
+                // with no visual difference from "ready to play" — so
+                // tapping it did nothing and looked broken, which is exactly
+                // what led to repeated tapping. This makes the busy state
+                // visible and un-tappable instead.
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title : .largeTitle)
+            } else {
+                Image(systemName: playerEngine.isPlaying ? "pause.fill" : "play.fill")
+                    .font(UIScreen.main.scale < UIScreen.main.nativeScale ? .title : .largeTitle)
+            }
         }
+        .disabled(playerEngine.playbackState == .loading)
     }
 
     private var nextButton: some View {
@@ -939,10 +952,17 @@ struct MiniPlayerView: View {
                                 playerEngine.play()
                             }
                         }) {
-                            Image(systemName: playerEngine.isPlaying ? "pause.circle" : "play.circle")
-                                .font(.title)
-                                .foregroundColor(.primary)
+                            if playerEngine.playbackState == .loading {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .font(.title)
+                            } else {
+                                Image(systemName: playerEngine.isPlaying ? "pause.circle" : "play.circle")
+                                    .font(.title)
+                                    .foregroundColor(.primary)
+                            }
                         }
+                        .disabled(playerEngine.playbackState == .loading)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)

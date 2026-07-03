@@ -1723,6 +1723,60 @@ class PlayerEngine: NSObject, ObservableObject {
     
     // MARK: - Queue Management
     
+    // MARK: - DSD prefetching
+    //
+    // DSD->PCM conversion (DSDToPCMConverter) can take several seconds for
+    // a full track and previously only ever started the moment the user hit
+    // Play, with no visual feedback — which is exactly what made playback
+    // feel broken/unresponsive. These prefetch calls start that conversion
+    // early (while the user is just browsing, or while an earlier track in
+    // the queue is still playing), so the cache is usually already warm by
+    // the time Play is actually pressed. Safe to call as often as needed:
+    // DSDToPCMConverter's own cache check makes a redundant prefetch of an
+    // already-converted (or in-flight) file a cheap no-op.
+    private var inFlightPrefetches: Set<String> = []
+
+    func prefetchTrack(_ track: Track) {
+        let url = URL(fileURLWithPath: track.path)
+        guard url.pathExtension.lowercased() == "dsf" else { return }
+        guard !inFlightPrefetches.contains(track.stableId) else { return }
+        inFlightPrefetches.insert(track.stableId)
+
+        Task.detached(priority: .utility) { [weak self] in
+            defer {
+                Task { @MainActor in self?.inFlightPrefetches.remove(track.stableId) }
+            }
+            do {
+                _ = try await DSDToPCMConverter.convertedFileURL(forDSDFileAt: url)
+                DebugLogger.shared.info("Prefetched DSD conversion for \(track.title)", category: "Playback")
+            } catch {
+                // Not fatal — this is opportunistic. The normal play() path
+                // will surface and log a real error if conversion is still
+                // failing when the user actually presses play.
+            }
+        }
+    }
+
+    /// Prefetches the next few tracks after `startingAfter` in `tracks`, so
+    /// upcoming DSD tracks in a queue are ready before playback reaches them.
+    func prefetchUpcoming(from tracks: [Track], startingAfter index: Int, count: Int = 2) {
+        guard !tracks.isEmpty else { return }
+        for offset in 1...count {
+            let i = index + offset
+            guard i < tracks.count else { break }
+            prefetchTrack(tracks[i])
+        }
+    }
+
+    /// Prefetches a whole set of tracks (e.g. all DSD tracks visible on an
+    /// album screen), capped so opening a huge album doesn't fire off dozens
+    /// of simultaneous background conversions.
+    func prefetchAll(_ tracks: [Track], limit: Int = 6) {
+        for track in tracks.prefix(limit) {
+            prefetchTrack(track)
+        }
+    }
+
     func playTrack(_ track: Track, queue: [Track] = []) async {
         print("🎵 Playing track: \(track.title)")
         
@@ -1739,7 +1793,13 @@ class PlayerEngine: NSObject, ObservableObject {
         originalQueue = playbackQueue.map { $0.stableId }
         
         normalizeIndexAndTrack()
-        
+
+        // Kick off background prefetch for what's coming up next in the
+        // queue while this track loads/plays — by the time the user reaches
+        // those tracks, DSD conversion (which can take several seconds) is
+        // often already done instead of blocking on first tap.
+        prefetchUpcoming(from: playbackQueue, startingAfter: currentIndex)
+
         await loadTrack(track)
         
         // Only auto-play if the load actually succeeded — otherwise this

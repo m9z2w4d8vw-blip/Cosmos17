@@ -351,6 +351,7 @@ struct AlbumDetailScreen: View {
             loadArtistNameCache()
             loadAlbumTracks()
             loadAlbumArtwork()
+            playerEngine.prefetchAll(filteredAlbumTracks)
         }
         .task {
             // Ensure data loads even if onAppear doesn't trigger
@@ -558,11 +559,21 @@ struct ArtistDetailScreenWrapper: View {
     let artistName: String
     let allTracks: [Track]
     @State private var artist: Artist?
+    @State private var lookupFailed = false
     
     var body: some View {
         Group {
             if let artist {
                 ArtistDetailScreen(artist: artist, allTracks: allTracks)
+            } else if lookupFailed {
+                VStack(spacing: 16) {
+                    Image(systemName: "person.crop.circle.badge.exclamationmark")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("Couldn't load \(artistName)")
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 16) {
                     ProgressView()
@@ -577,12 +588,24 @@ struct ArtistDetailScreenWrapper: View {
     
     private func loadArtist() {
         do {
-            artist = try DatabaseManager.shared.read { db in
+            if let found = try DatabaseManager.shared.read(({ db in
                 try Artist.filter(Column("name") == artistName).fetchOne(db)
-            } ?? Artist(id: nil, name: artistName)
+            })) {
+                artist = found
+            } else {
+                // No matching Artist row in the database. Previously this
+                // fell back to a placeholder Artist(id: nil, ...) and
+                // navigated into ArtistDetailScreen anyway — if that screen
+                // (or anything it calls) assumes a real, non-nil artist.id
+                // (e.g. to query tracks by artist_id), that's a crash. Since
+                // this wrapper only has a name — no guaranteed real row to
+                // show — showing a clear "couldn't load" state is safer
+                // than guessing at what a nil-id Artist should render as.
+                lookupFailed = true
+            }
         } catch {
             print("Failed to load artist: \(error)")
-            artist = Artist(id: nil, name: artistName)
+            lookupFailed = true
         }
     }
 }
