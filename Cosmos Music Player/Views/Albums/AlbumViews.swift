@@ -631,6 +631,8 @@ struct AlbumMetadataEditView: View {
     @State private var artistFieldFocused = false
 
     // Apple Music album matching
+    @State private var albumSearchText: String = ""
+    @State private var searchedArtistName: String?
     @State private var albumSuggestions: [ITunesAlbum] = []
     @State private var isSearchingAlbums = false
     @State private var matchedAlbum: ITunesAlbum?
@@ -736,6 +738,18 @@ struct AlbumMetadataEditView: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
                     }
+
+                    TextField("Album name", text: $albumSearchText)
+                        .disabled(isSaving || searchedArtistName == nil)
+                    if searchedArtistName == nil {
+                        Text("Search an artist above first, then narrow down their albums here.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    } else if let searchedArtistName {
+                        Text("Searching \(searchedArtistName)'s albums" + (albumSearchText.trimmingCharacters(in: .whitespaces).isEmpty ? "" : " matching \"\(albumSearchText)\""))
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 if isSearchingAlbums {
@@ -745,9 +759,9 @@ struct AlbumMetadataEditView: View {
                             Text("Looking up albums…").font(.footnote).foregroundColor(.secondary)
                         }
                     }
-                } else if !albumSuggestions.isEmpty {
+                } else if !displayedAlbumSuggestions.isEmpty {
                     Section(header: Text("Match Apple Music Album")) {
-                        ForEach(albumSuggestions) { candidate in
+                        ForEach(displayedAlbumSuggestions) { candidate in
                             Button {
                                 selectAlbum(candidate)
                             } label: {
@@ -836,6 +850,7 @@ struct AlbumMetadataEditView: View {
         artistSearchTask?.cancel()
         matchedAlbum = nil
         albumSuggestions = []
+        searchedArtistName = nil
 
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 2 else {
@@ -868,9 +883,22 @@ struct AlbumMetadataEditView: View {
 
     // MARK: - Album matching
 
+    /// The album list actually shown: `albumSuggestions` (all albums fetched
+    /// for `searchedArtistName`) narrowed down by whatever's typed in the
+    /// album name field. Filtering client-side over the already-fetched list
+    /// rather than firing a new network search per keystroke — the artist's
+    /// full album list is already in memory from `loadAlbums`.
+    private var displayedAlbumSuggestions: [ITunesAlbum] {
+        let query = albumSearchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return albumSuggestions }
+        return albumSuggestions.filter { $0.collectionName.lowercased().contains(query) }
+    }
+
     private func loadAlbums(forArtist artistName: String) {
         isSearchingAlbums = true
         albumSuggestions = []
+        albumSearchText = ""
+        searchedArtistName = artistName
         Task {
             do {
                 let results = try await AppleMusicLookupService.searchAlbums(artistName: artistName)
