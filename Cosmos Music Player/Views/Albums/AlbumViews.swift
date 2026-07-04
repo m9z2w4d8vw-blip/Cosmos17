@@ -1008,6 +1008,13 @@ struct AlbumMetadataEditView: View {
                     )
                     if pendingArtworkJPEGData != nil {
                         try? DatabaseManager.shared.updateTrackHasEmbeddedArt(trackStableId: track.stableId, hasEmbeddedArt: true)
+                        // Without this, a previously-cached (e.g. blank/old)
+                        // artwork result for this track would keep being
+                        // served from ArtworkManager's memory/disk cache
+                        // indefinitely, even though the file itself now has
+                        // a fresh APIC frame — the cache has no other way to
+                        // know the underlying file changed.
+                        _ = await ArtworkManager.shared.forceRefreshArtwork(for: track)
                     }
                 } catch {
                     fileWriteFailures.append("\(track.title): \(error.localizedDescription)")

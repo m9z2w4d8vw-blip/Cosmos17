@@ -141,7 +141,7 @@ class ArtworkManager: ObservableObject {
             return
         }
 
-        print("💾 Pre-caching artwork for: \(track.title)")
+        DebugLogger.shared.info("💾 Pre-caching artwork for: \(track.title)", category: "Artwork")
 
         // Extract artwork from audio file
         if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
@@ -153,24 +153,29 @@ class ArtworkManager: ObservableObject {
     func getArtwork(for track: Track) async -> UIImage? {
         // 1. Check memory cache first (fastest)
         if let cachedImage = memoryCache.object(forKey: track.stableId as NSString) {
+            DebugLogger.shared.info("Artwork memory cache HIT for \(track.title)", category: "Artwork")
             return cachedImage
         }
 
         // 2. Check disk cache (fast)
         if let diskImage = await loadFromDiskCache(stableId: track.stableId) {
+            DebugLogger.shared.info("Artwork disk cache HIT for \(track.title)", category: "Artwork")
             // Store in memory cache for next time
             cacheImage(diskImage, for: track.stableId)
             return diskImage
         }
 
         // 3. Extract from audio file and cache (slow - should be rare after indexing)
+        DebugLogger.shared.info("Artwork cache MISS for \(track.title) — extracting from \(track.path)", category: "Artwork")
         if let image = await extractArtwork(from: URL(fileURLWithPath: track.path)) {
+            DebugLogger.shared.info("Artwork extraction SUCCEEDED for \(track.title)", category: "Artwork")
             // Store in both caches
             cacheImage(image, for: track.stableId)
             await saveToDiskCache(image: image, stableId: track.stableId)
             return image
         }
 
+        DebugLogger.shared.info("Artwork extraction FAILED (no artwork found) for \(track.title)", category: "Artwork")
         return nil
     }
 
@@ -470,7 +475,7 @@ class ArtworkManager: ObservableObject {
             }
 
             // Fallback to binary signature search for both DSF and DFF files
-            print("⚠️ No ID3v2 artwork found, searching for binary signatures in: \(url.lastPathComponent)")
+            DebugLogger.shared.info("⚠️ No ID3v2 artwork found, searching for binary signatures in: \(url.lastPathComponent)", category: "Artwork")
 
             // Image signatures to look for
             let jpegSignature = Data([0xFF, 0xD8, 0xFF])
@@ -490,7 +495,7 @@ class ArtworkManager: ObservableObject {
                     let imageData = data.subdata(in: startOffset..<endOffset)
 
                     if let image = UIImage(data: imageData) {
-                        print("🎨 Extracted JPEG artwork from DSD file (binary search): \(url.lastPathComponent)")
+                        DebugLogger.shared.info("🎨 Extracted JPEG artwork from DSD file (binary search): \(url.lastPathComponent)", category: "Artwork")
                         return image
                     }
                 }
@@ -507,16 +512,16 @@ class ArtworkManager: ObservableObject {
                     let imageData = data.subdata(in: startOffset..<min(endOffset, data.count))
 
                     if let image = UIImage(data: imageData) {
-                        print("🎨 Extracted PNG artwork from DSD file (binary search): \(url.lastPathComponent)")
+                        DebugLogger.shared.info("🎨 Extracted PNG artwork from DSD file (binary search): \(url.lastPathComponent)", category: "Artwork")
                         return image
                     }
                 }
             }
 
-            print("⚠️ No artwork found in DSD file: \(url.lastPathComponent)")
+            DebugLogger.shared.info("⚠️ No artwork found in DSD file: \(url.lastPathComponent)", category: "Artwork")
             return nil
         } catch {
-            print("❌ DSD artwork extraction failed: \(error)")
+            DebugLogger.shared.error("❌ DSD artwork extraction failed: \(error)", category: "Artwork")
             return nil
         }
     }
@@ -526,7 +531,7 @@ class ArtworkManager: ObservableObject {
         // Validate DSF signature: 'D', 'S', 'D', ' ' (includes 1 space)
         guard data.count >= 28,
               data[0] == 0x44, data[1] == 0x53, data[2] == 0x44, data[3] == 0x20 else {
-            print("⚠️ Invalid DSF signature in: \(filename)")
+            DebugLogger.shared.error("⚠️ Invalid DSF signature in: \(filename)", category: "Artwork")
             return nil
         }
 
@@ -534,7 +539,7 @@ class ArtworkManager: ObservableObject {
         let metadataPointer = readLittleEndianUInt64(from: data, offset: 20)
 
         guard metadataPointer > 0 && metadataPointer < data.count else {
-            print("⚠️ No metadata pointer in DSF file: \(filename)")
+            DebugLogger.shared.info("⚠️ No metadata pointer in DSF file: \(filename)", category: "Artwork")
             return nil
         }
 
@@ -545,11 +550,11 @@ class ArtworkManager: ObservableObject {
               data[metadataOffset] == 0x49, // 'I'
               data[metadataOffset + 1] == 0x44, // 'D'
               data[metadataOffset + 2] == 0x33 else { // '3'
-            print("⚠️ No ID3v2 tag found at metadata pointer in: \(filename)")
+            DebugLogger.shared.info("⚠️ No ID3v2 tag found at metadata pointer in: \(filename)", category: "Artwork")
             return nil
         }
 
-        print("🏷️ Found ID3v2 tag in DSF file: \(filename)")
+        DebugLogger.shared.info("🏷️ Found ID3v2 tag in DSF file: \(filename)", category: "Artwork")
 
         let id3Data = data.subdata(in: metadataOffset..<data.count)
         return extractArtworkFromID3v2(data: id3Data, filename: filename)
@@ -563,7 +568,7 @@ class ArtworkManager: ObservableObject {
         let majorVersion = data[3]
         let tagSize = Int((UInt32(data[6]) << 21) | (UInt32(data[7]) << 14) | (UInt32(data[8]) << 7) | UInt32(data[9]))
 
-        print("🏷️ Searching for APIC frame in ID3v2.\(majorVersion) tag, size: \(tagSize) bytes")
+        DebugLogger.shared.info("🏷️ Searching for APIC frame in ID3v2.\(majorVersion) tag, size: \(tagSize) bytes", category: "Artwork")
 
         // Parse frames to find APIC (attached picture)
         var offset = 10
@@ -590,7 +595,7 @@ class ArtworkManager: ObservableObject {
             }
 
             if frameId == "APIC" {
-                print("🎨 Found APIC frame in \(filename), size: \(frameSize) bytes")
+                DebugLogger.shared.info("🎨 Found APIC frame in \(filename), size: \(frameSize) bytes", category: "Artwork")
 
                 let frameData = data.subdata(in: offset..<offset+frameSize)
 
@@ -625,24 +630,24 @@ class ArtworkManager: ObservableObject {
 
                 // Extract image data
                 guard frameOffset < frameData.count else {
-                    print("⚠️ Invalid APIC frame structure in: \(filename)")
+                    DebugLogger.shared.error("⚠️ Invalid APIC frame structure in: \(filename)", category: "Artwork")
                     break
                 }
 
                 let imageData = frameData.subdata(in: frameOffset..<frameData.count)
 
                 if let image = UIImage(data: imageData) {
-                    print("✅ Successfully extracted artwork from ID3v2 APIC frame: \(filename)")
+                    DebugLogger.shared.info("✅ Successfully extracted artwork from ID3v2 APIC frame: \(filename)", category: "Artwork")
                     return image
                 } else {
-                    print("⚠️ Could not create UIImage from APIC data in: \(filename)")
+                    DebugLogger.shared.info("⚠️ Could not create UIImage from APIC data in: \(filename)", category: "Artwork")
                 }
             }
 
             offset += frameSize
         }
 
-        print("⚠️ No APIC frame found in ID3v2 tag: \(filename)")
+        DebugLogger.shared.info("⚠️ No APIC frame found in ID3v2 tag: \(filename)", category: "Artwork")
         return nil
     }
 
