@@ -624,6 +624,7 @@ struct AlbumMetadataEditView: View {
     @State private var errorMessage: String?
 
     // Artist autocomplete
+    @State private var appleMusicSearchText: String = ""
     @State private var artistSuggestions: [ITunesArtist] = []
     @State private var isSearchingArtists = false
     @State private var artistSearchTask: Task<Void, Never>?
@@ -647,6 +648,7 @@ struct AlbumMetadataEditView: View {
         _titleText = State(initialValue: album.title)
         let initialArtist = (album.albumArtist?.isEmpty == false) ? album.albumArtist! : ""
         _artistText = State(initialValue: initialArtist)
+        _appleMusicSearchText = State(initialValue: initialArtist)
     }
 
     var body: some View {
@@ -695,36 +697,44 @@ struct AlbumMetadataEditView: View {
                 Section(header: Text("Album")) {
                     TextField("Album Title", text: $titleText)
                         .disabled(isSaving)
+                    TextField("Artist", text: $artistText)
+                        .disabled(isSaving)
+                }
 
-                    VStack(alignment: .leading, spacing: 0) {
-                        TextField("Artist", text: $artistText)
-                            .disabled(isSaving)
-                            .onChange(of: artistText) { _, newValue in
-                                scheduleArtistSearch(for: newValue)
-                            }
+                Section(header: Text("Search Apple Music")) {
+                    TextField("Artist name", text: $appleMusicSearchText)
+                        .disabled(isSaving)
+                        .onChange(of: appleMusicSearchText) { _, newValue in
+                            scheduleArtistSearch(for: newValue)
+                        }
 
-                        if isSearchingArtists {
-                            HStack {
-                                ProgressView().scaleEffect(0.7)
-                                Text("Searching…").font(.footnote).foregroundColor(.secondary)
-                            }
-                            .padding(.top, 4)
-                        } else if !artistSuggestions.isEmpty {
-                            ForEach(artistSuggestions) { suggestion in
-                                Button {
-                                    selectArtist(suggestion)
-                                } label: {
-                                    HStack {
-                                        Image(systemName: "person.crop.circle")
-                                            .foregroundColor(.secondary)
-                                        Text(suggestion.artistName)
-                                            .foregroundColor(.primary)
-                                        Spacer()
-                                    }
+                    if isSearchingArtists {
+                        HStack {
+                            ProgressView().scaleEffect(0.7)
+                            Text("Searching…").font(.footnote).foregroundColor(.secondary)
+                        }
+                    } else if !artistSuggestions.isEmpty {
+                        ForEach(artistSuggestions) { suggestion in
+                            Button {
+                                selectArtist(suggestion)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "person.crop.circle")
+                                        .foregroundColor(.secondary)
+                                    Text(suggestion.artistName)
+                                        .foregroundColor(.primary)
+                                    Spacer()
                                 }
-                                .padding(.top, 6)
                             }
                         }
+                    } else if !appleMusicSearchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text("No matching artists")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Type an artist name to look up their albums on Apple Music and match this album's title, artist, year, and cover art.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
                 }
 
@@ -791,6 +801,11 @@ struct AlbumMetadataEditView: View {
                 }
             }
             .navigationTitle("Edit Album")
+            .onAppear {
+                if !appleMusicSearchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    scheduleArtistSearch(for: appleMusicSearchText)
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
