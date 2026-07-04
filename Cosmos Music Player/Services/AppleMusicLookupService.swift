@@ -82,6 +82,7 @@ enum AppleMusicLookupService {
             URLQueryItem(name: "term", value: trimmed),
             URLQueryItem(name: "entity", value: "album"),
             URLQueryItem(name: "attribute", value: "artistTerm"),
+            URLQueryItem(name: "explicit", value: "Yes"), // iTunes Search excludes explicit-tagged albums by default (e.g. "Norman F***ing Rockwell!") — without this, they never show up in results at all, regardless of any local filtering
             URLQueryItem(name: "limit", value: String(limit))
         ]
         guard let url = components.url else { throw AppleMusicLookupError.invalidResponse }

@@ -63,7 +63,14 @@ final class DSDToPCMConverter {
     /// If a valid cache entry already exists for this exact source file
     /// (matched by path + modification date), conversion is skipped.
     static func convertedFileURL(forDSDFileAt sourceURL: URL) async throws -> URL {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        // IMPORTANT: this must be Documents, not Caches. Caches is explicitly
+        // allowed to be purged by iOS at any time — low disk space, app not
+        // running, reinstalls — with zero warning. A ~10-second-per-track
+        // conversion cache stored there provides no real benefit at all if
+        // it keeps evaporating between sessions, which is exactly what was
+        // happening here. ArtworkManager already correctly uses Documents
+        // for its own disk cache — this matches that existing pattern.
+        let cacheDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("DSDConverted", isDirectory: true)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
